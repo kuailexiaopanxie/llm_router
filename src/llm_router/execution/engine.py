@@ -259,6 +259,7 @@ class ExecutionEngine:
                         completion=completion,
                         attempts=tuple(attempts),
                     )
+                content_type = self._content_type(exchange.headers)
                 upstream_request_id = exchange.headers.get("request-id")
                 payload = await self._json_body(
                     exchange,
