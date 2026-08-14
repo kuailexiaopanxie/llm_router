@@ -1,0 +1,67 @@
+version: 1
+
+server:
+  host: 127.0.0.1
+  port: 8848
+  client_api_key_env: LLM_ROUTER_CLIENT_API_KEY
+  max_request_bytes: 16777216
+
+storage:
+  sqlite_path: ~/.llm-router/router.db
+
+providers:
+  anthropic:
+    type: anthropic
+    base_url: https://api.anthropic.com
+    api_key_env: LLM_ROUTER_ANTHROPIC_API_KEY
+    auth_scheme: x_api_key
+    max_concurrency: 16
+
+models:
+  fast:
+    provider: anthropic
+    upstream_model: configured-fast-model
+    tier: fast
+    capabilities: [streaming, tools, prompt_cache]
+    max_input_tokens: 200000
+  balanced:
+    provider: anthropic
+    upstream_model: configured-balanced-model
+    tier: balanced
+    capabilities: [streaming, tools, thinking, vision, prompt_cache]
+    max_input_tokens: 200000
+  deep:
+    provider: anthropic
+    upstream_model: configured-deep-model
+    tier: deep
+    capabilities: [streaming, tools, thinking, vision, prompt_cache]
+    max_input_tokens: 200000
+
+profiles:
+  code/auto:
+    mode: auto
+  code/fast:
+    primary: fast
+    fallback: [balanced]
+  code/balanced:
+    primary: balanced
+    fallback: [deep]
+  code/deep:
+    primary: deep
+    fallback: []
+
+routing:
+  default_profile: code/auto
+  policy_version: v1
+  session_ttl_seconds: 7200
+  failure_escalation_requests: 2
+  fast_max_input_tokens: 8000
+  balanced_max_input_tokens: 64000
+  deep_tool_rounds_threshold: 3
+
+timeouts:
+  connect_seconds: 5
+  response_header_seconds: 30
+  non_stream_deadline_seconds: 120
+  stream_idle_seconds: 90
+  stream_max_seconds: 1800

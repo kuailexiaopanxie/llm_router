@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+*.egg-info/
+.idea/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.venv/
+router.yaml
+*.db
+*.db-shm
+*.db-wal
