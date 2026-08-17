@@ -17,6 +17,17 @@ class Capability(StrEnum):
     THINKING = "thinking"
     VISION = "vision"
     PROMPT_CACHE = "prompt_cache"
+    REASONING = "reasoning"
+    STRUCTURED_OUTPUT = "structured_output"
+    RESPONSE_STATE = "response_state"
+    PROVIDER_MANAGED_TOOLS = "provider_managed_tools"
+
+
+class Protocol(StrEnum):
+    """Inbound and upstream protocol families supported by the router."""
+
+    ANTHROPIC_MESSAGES = "anthropic_messages"
+    OPENAI_RESPONSES = "openai_responses"
 
 
 class Tier(StrEnum):
@@ -40,7 +51,7 @@ class ProtocolEnvelope:
     """Preserve the inbound protocol body and approved headers for one request."""
 
     request_id: str
-    protocol: str
+    protocol: Protocol
     raw_body: Mapping[str, Any]
     safe_headers: Mapping[str, str]
     stream: bool
@@ -73,6 +84,9 @@ class RoutingRequest:
     session_id: str | None
     stream: bool
     count_only: bool = False
+    protocol: Protocol = Protocol.ANTHROPIC_MESSAGES
+    response_state_requested: bool = False
+    provider_managed_tools_requested: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +101,8 @@ class ModelTarget:
     max_input_tokens: int
     input_price_per_million: float | None
     output_price_per_million: float | None
+    protocol: Protocol = Protocol.ANTHROPIC_MESSAGES
+    state_scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,3 +232,8 @@ class RouteEvent:
     estimated_cost: float | None = None
     error_code: str | None = None
     attempts: tuple[AttemptEvent, ...] = field(default_factory=tuple)
+    inbound_protocol: str | None = None
+    target_protocol: str | None = None
+    provider_account_scope: str | None = None
+    response_state_requested: bool = False
+    translation_mode: str = "none"

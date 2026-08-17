@@ -1,4 +1,4 @@
-"""FastAPI application assembly and Anthropic-compatible HTTP gateway."""
+"""FastAPI application assembly for Anthropic Messages and OpenAI Responses."""
 
 from __future__ import annotations
 
@@ -13,10 +13,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from llm_router.config import RouterConfig, load_config
+from llm_router.domain import Protocol
 from llm_router.execution.engine import ExecutionEngine
+from llm_router.execution.stream_semantics import AnthropicStreamSemantics, OpenAIStreamSemantics
 from llm_router.gateway.anthropic import AnthropicGateway
 from llm_router.gateway.errors import not_ready
-from llm_router.providers.anthropic import ProviderRegistry
+from llm_router.gateway.openai import OpenAIResponsesGateway
+from llm_router.gateway.renderers import AnthropicErrorRenderer
+from llm_router.providers.registry import ProviderRegistry
 from llm_router.routing.kernel import RoutingKernel
 from llm_router.routing.session import SessionStateStore
 from llm_router.telemetry.metrics import RouterMetrics
@@ -86,13 +90,20 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
         config=config,
         client_key=client_key,
         providers=providers,
-        engine=ExecutionEngine({name: providers.get(name) for name in config.providers}),
+        engine=ExecutionEngine(
+            {name: providers.get(name) for name in config.providers},
+            {
+                Protocol.ANTHROPIC_MESSAGES: AnthropicStreamSemantics(),
+                Protocol.OPENAI_RESPONSES: OpenAIStreamSemantics(),
+            },
+        ),
         kernel=RoutingKernel(config, sessions),
         sessions=sessions,
         telemetry=telemetry,
         metrics=metrics,
     )
-    gateway = AnthropicGateway(runtime)
+    anthropic_gateway = AnthropicGateway(runtime)
+    openai_gateway = OpenAIResponsesGateway(runtime)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -107,20 +118,26 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
             await runtime.telemetry.close()
             await runtime.providers.close()
 
-    app = FastAPI(title="Coding LLM Router", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Coding LLM Router", version="0.2.0", lifespan=lifespan)
     app.state.runtime = runtime
 
     @app.post("/v1/messages")
     async def messages(request: Request) -> Response:
         """Proxy an Anthropic Messages request."""
 
-        return await gateway.handle(request)
+        return await anthropic_gateway.handle(request)
 
     @app.post("/v1/messages/count_tokens")
     async def count_tokens(request: Request) -> Response:
         """Proxy a count-tokens request through the same routing kernel."""
 
-        return await gateway.handle(request, count_only=True)
+        return await anthropic_gateway.handle(request, count_only=True)
+
+    @app.post("/v1/responses")
+    async def responses(request: Request) -> Response:
+        """Proxy an OpenAI Responses request."""
+
+        return await openai_gateway.handle(request)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -134,13 +151,7 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
 
         if not runtime.ready:
             error = not_ready()
-            return JSONResponse(
-                status_code=error.http_status,
-                content={
-                    "type": "error",
-                    "error": {"type": error.anthropic_type, "message": error.message},
-                },
-            )
+            return AnthropicErrorRenderer().json_error(error, "readiness")
         return JSONResponse({"status": "ready"})
 
     @app.get("/metrics")

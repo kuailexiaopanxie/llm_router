@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from llm_router.domain import Capability, ExecutionTimeouts, ModelTarget, Tier
+from llm_router.domain import Capability, ExecutionTimeouts, ModelTarget, Protocol, Tier
 
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 
@@ -54,9 +54,9 @@ class StorageConfig(StrictModel):
 
 
 class ProviderConfig(StrictModel):
-    """Anthropic-compatible upstream connection settings."""
+    """Protocol provider connection settings."""
 
-    type: Literal["anthropic"]
+    type: Literal["anthropic", "openai"]
     base_url: str
     api_key_env: str
     auth_scheme: Literal["x_api_key", "bearer"] = "x_api_key"
@@ -69,6 +69,8 @@ class ProviderConfig(StrictModel):
 
         if not self.base_url.startswith(("https://", "http://")):
             raise ValueError("base_url must use http or https")
+        if self.type == "openai" and self.auth_scheme != "bearer":
+            raise ValueError("openai providers require auth_scheme='bearer'")
         return self
 
 
@@ -82,6 +84,12 @@ class ModelConfig(StrictModel):
     max_input_tokens: int = Field(gt=0)
     input_price_per_million: float | None = Field(default=None, ge=0)
     output_price_per_million: float | None = Field(default=None, ge=0)
+    protocol: Protocol = Protocol.ANTHROPIC_MESSAGES
+    state_scope: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+    )
 
     @model_validator(mode="after")
     def validate_model_identity(self) -> ModelConfig:
@@ -98,11 +106,41 @@ class AutoProfileConfig(StrictModel):
     mode: Literal["auto"]
 
 
-class ExplicitProfileConfig(StrictModel):
-    """Ordered model aliases for an explicit route profile."""
+class TargetChainConfig(StrictModel):
+    """Ordered primary and fallback aliases for one inbound protocol."""
 
     primary: str
     fallback: tuple[str, ...] = ()
+
+
+class ExplicitProfileConfig(StrictModel):
+    """Protocol-specific ordered model aliases for an explicit route profile."""
+
+    targets: dict[Protocol, TargetChainConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_v01_chain(cls, value: object) -> object:
+        """Migrate the v0.1 primary/fallback shape into an Anthropic chain."""
+
+        if not isinstance(value, dict) or "targets" in value:
+            return value
+        primary = value.get("primary")
+        if primary is None:
+            return value
+        return {
+            "targets": {
+                Protocol.ANTHROPIC_MESSAGES.value: {
+                    "primary": primary,
+                    "fallback": value.get("fallback", ()),
+                }
+            }
+        }
+
+    def chain_for(self, protocol: Protocol) -> TargetChainConfig | None:
+        """Return the configured target chain for one inbound protocol."""
+
+        return self.targets.get(protocol)
 
 
 ProfileConfig = Annotated[AutoProfileConfig | ExplicitProfileConfig, Field(union_mode="left_to_right")]
@@ -173,25 +211,56 @@ class RouterConfig(StrictModel):
         for alias, model in self.models.items():
             if model.provider not in self.providers:
                 raise ValueError(f"model {alias!r} references an unknown provider")
+            provider_protocol = (
+                Protocol.OPENAI_RESPONSES
+                if self.providers[model.provider].type == "openai"
+                else Protocol.ANTHROPIC_MESSAGES
+            )
+            if model.protocol is not provider_protocol:
+                raise ValueError(
+                    f"model {alias!r} protocol {model.protocol.value!r} does not match provider "
+                    f"{model.provider!r} type {self.providers[model.provider].type!r}"
+                )
+            if model.state_scope is not None and not model.state_scope.strip():
+                raise ValueError(f"model {alias!r} state_scope must be non-empty when declared")
+            if Capability.RESPONSE_STATE in model.capabilities and model.state_scope is None:
+                raise ValueError(f"stateful model {alias!r} must declare state_scope")
         for name, profile in self.profiles.items():
             if isinstance(profile, AutoProfileConfig):
                 continue
-            chain = (profile.primary, *profile.fallback)
-            if len(chain) != len(set(chain)):
-                raise ValueError(f"profile {name!r} contains a fallback cycle or duplicate")
-            unknown = [alias for alias in chain if alias not in self.models]
-            if unknown:
-                raise ValueError(f"profile {name!r} references unknown models: {unknown}")
-            primary = self.models[profile.primary]
-            for fallback_alias in profile.fallback:
-                fallback = self.models[fallback_alias]
-                if not primary.capabilities.issubset(fallback.capabilities):
-                    raise ValueError(
-                        f"fallback {fallback_alias!r} is not capability-equivalent to {profile.primary!r}"
-                    )
-        tiers = {model.tier for model in self.models.values()}
-        if set(Tier) - tiers:
-            raise ValueError("automatic routing requires at least one model in every tier")
+            if not profile.targets:
+                raise ValueError(f"profile {name!r} must declare at least one protocol target chain")
+            for protocol, target_chain in profile.targets.items():
+                chain = (target_chain.primary, *target_chain.fallback)
+                if len(chain) != len(set(chain)):
+                    raise ValueError(f"profile {name!r} contains a fallback cycle or duplicate")
+                unknown = [alias for alias in chain if alias not in self.models]
+                if unknown:
+                    raise ValueError(f"profile {name!r} references unknown models: {unknown}")
+                configured_models = [self.models[alias] for alias in chain]
+                if any(model.protocol is not protocol for model in configured_models):
+                    raise ValueError(f"profile {name!r} mixes protocols in {protocol.value!r} target chain")
+                primary = configured_models[0]
+                for fallback_alias, fallback in zip(target_chain.fallback, configured_models[1:]):
+                    if not primary.capabilities.issubset(fallback.capabilities):
+                        raise ValueError(
+                            f"fallback {fallback_alias!r} "
+                            f"is not capability-equivalent to {target_chain.primary!r}"
+                        )
+                    if (
+                        Capability.RESPONSE_STATE in primary.capabilities
+                        and primary.state_scope != fallback.state_scope
+                    ):
+                        raise ValueError(
+                            f"profile {name!r} fallback crosses state_scope for {protocol.value!r}"
+                        )
+        protocols = {model.protocol for model in self.models.values()}
+        if not protocols:
+            raise ValueError("automatic routing requires configured model targets")
+        for protocol in protocols:
+            tiers = {model.tier for model in self.models.values() if model.protocol is protocol}
+            if set(Tier) - tiers:
+                raise ValueError(f"automatic routing requires fast, balanced, and deep {protocol.value} targets")
         return self
 
     @property
@@ -220,6 +289,8 @@ class RouterConfig(StrictModel):
                 max_input_tokens=model.max_input_tokens,
                 input_price_per_million=model.input_price_per_million,
                 output_price_per_million=model.output_price_per_million,
+                protocol=model.protocol,
+                state_scope=model.state_scope,
             )
             for alias, model in self.models.items()
         }

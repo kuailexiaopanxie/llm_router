@@ -1,4 +1,4 @@
-"""Anthropic Messages protocol gateway."""
+"""OpenAI Responses protocol gateway."""
 
 from __future__ import annotations
 
@@ -20,18 +20,18 @@ from llm_router.gateway.common import (
     route_headers,
 )
 from llm_router.gateway.errors import RouterError, invalid_request
-from llm_router.gateway.renderers import AnthropicErrorRenderer
-from llm_router.routing.features import extract_routing_request
+from llm_router.gateway.renderers import OpenAIErrorRenderer
+from llm_router.routing.openai_features import extract_routing_request
 
 
-class AnthropicGateway:
-    """Translate HTTP requests into routing plans and protocol-transparent responses."""
+class OpenAIResponsesGateway:
+    """Route OpenAI Responses requests without protocol translation."""
 
     def __init__(self, runtime: Any) -> None:
-        """Bind assembled router dependencies and the Anthropic renderer."""
+        """Bind assembled router dependencies and the OpenAI renderer."""
 
         self._runtime = runtime
-        self._errors = AnthropicErrorRenderer()
+        self._errors = OpenAIErrorRenderer()
 
     @staticmethod
     def _usage(payload: bytes) -> tuple[int | None, int | None]:
@@ -51,8 +51,8 @@ class AnthropicGateway:
             output_tokens if isinstance(output_tokens, int) else None,
         )
 
-    async def handle(self, request: Request, count_only: bool = False) -> Response:
-        """Handle one Anthropic Messages or count-tokens request."""
+    async def handle(self, request: Request) -> Response:
+        """Handle one OpenAI Responses request."""
 
         runtime = self._runtime
         config = runtime.config
@@ -65,20 +65,22 @@ class AnthropicGateway:
             model = body.get("model", config.routing.default_profile)
             if not isinstance(model, str) or not model:
                 raise invalid_request("The model field must be a configured string.")
-            session_id = request.headers.get("x-llm-router-session-id")
-            protocol = Protocol.ANTHROPIC_MESSAGES
-            extension_headers = provider_extension_headers(config, protocol)
+            protocol = Protocol.OPENAI_RESPONSES
             envelope = ProtocolEnvelope(
                 request_id=rid,
                 protocol=protocol,
                 raw_body=body,
-                safe_headers=safe_headers(request.headers, extension_headers),
-                stream=body.get("stream") is True and not count_only,
+                safe_headers=safe_headers(request.headers, provider_extension_headers(config, protocol)),
+                stream=body.get("stream") is True,
                 received_at=datetime.now(timezone.utc),
-                endpoint="/v1/messages/count_tokens" if count_only else "/v1/messages",
+                endpoint="/v1/responses",
             )
             stage = "route"
-            routing_request = extract_routing_request(body, model, session_id, count_only=count_only)
+            routing_request = extract_routing_request(
+                body,
+                model,
+                request.headers.get("x-llm-router-session-id"),
+            )
             plan = runtime.kernel.plan(routing_request)
             stage = "execute"
             response = await runtime.engine.execute(envelope, plan)

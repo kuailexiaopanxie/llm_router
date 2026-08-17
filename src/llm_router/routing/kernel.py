@@ -24,8 +24,18 @@ class RoutingKernel:
         """Check all hard capabilities and input capacity before ranking."""
 
         return (
-            request.required_capabilities.issubset(target.capabilities)
+            target.protocol is request.protocol
+            and request.required_capabilities.issubset(target.capabilities)
             and request.estimated_input_tokens <= target.max_input_tokens
+            and (
+                not request.response_state_requested
+                or Capability.RESPONSE_STATE in target.capabilities
+                and target.state_scope is not None
+            )
+            and (
+                not request.provider_managed_tools_requested
+                or Capability.PROVIDER_MANAGED_TOOLS in target.capabilities
+            )
         )
 
     def _auto_tier(self, request: RoutingRequest, state: SessionState | None) -> tuple[Tier, list[str]]:
@@ -45,7 +55,14 @@ class RoutingKernel:
             return Tier.DEEP, reasons
         if (
             request.required_capabilities
-            & {Capability.TOOLS, Capability.THINKING, Capability.VISION}
+            & {
+                Capability.TOOLS,
+                Capability.THINKING,
+                Capability.VISION,
+                Capability.REASONING,
+                Capability.STRUCTURED_OUTPUT,
+                Capability.PROVIDER_MANAGED_TOOLS,
+            }
             or request.task_signals.complex_planning
             or request.task_signals.debugging
             or request.task_signals.review
@@ -67,7 +84,11 @@ class RoutingKernel:
         for tier in _TIER_ORDER[start:]:
             result.extend(
                 sorted(
-                    (target for target in self._targets.values() if target.tier is tier and self._capable(target, request)),
+                    (
+                        target
+                        for target in self._targets.values()
+                        if target.tier is tier and self._capable(target, request)
+                    ),
                     key=lambda target: target.alias,
                 )
             )
@@ -90,13 +111,24 @@ class RoutingKernel:
             route_reason = reasons[0]
         else:
             assert isinstance(profile, ExplicitProfileConfig)
-            configured = [self._targets[alias] for alias in (profile.primary, *profile.fallback)]
+            chain = profile.chain_for(request.protocol)
+            if chain is None:
+                raise no_capable_model()
+            configured = [self._targets[alias] for alias in (chain.primary, *chain.fallback)]
             targets = [target for target in configured if self._capable(target, request)]
             route_reason = f"explicit_{profile_name.replace('/', '_')}"
             if not targets:
                 raise no_capable_model()
             if len(targets) < len(configured):
                 auxiliary.append("incapable_target_filtered")
+        if request.response_state_requested:
+            primary_scope = targets[0].state_scope
+            scoped_targets = [target for target in targets if target.state_scope == primary_scope]
+            if len(scoped_targets) < len(targets):
+                auxiliary.append("state_scope_filtered")
+            targets = scoped_targets
+            if len(targets) < 2 or self._config.routing.attempt_limit < 2:
+                auxiliary.append("stateful_no_cross_scope_fallback")
         if not targets:
             raise no_capable_model()
         primary, *fallbacks = targets

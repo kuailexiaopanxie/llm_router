@@ -16,39 +16,84 @@ providers:
     api_key_env: LLM_ROUTER_ANTHROPIC_API_KEY
     auth_scheme: x_api_key
     max_concurrency: 16
+  openai:
+    type: openai
+    base_url: https://api.openai.com
+    api_key_env: LLM_ROUTER_OPENAI_API_KEY
+    auth_scheme: bearer
+    max_concurrency: 16
 
 models:
-  fast:
+  anthropic_fast:
     provider: anthropic
     upstream_model: configured-fast-model
     tier: fast
     capabilities: [streaming, tools, prompt_cache]
     max_input_tokens: 200000
-  balanced:
+  anthropic_balanced:
     provider: anthropic
     upstream_model: configured-balanced-model
     tier: balanced
     capabilities: [streaming, tools, thinking, vision, prompt_cache]
     max_input_tokens: 200000
-  deep:
+  anthropic_deep:
     provider: anthropic
     upstream_model: configured-deep-model
     tier: deep
     capabilities: [streaming, tools, thinking, vision, prompt_cache]
+    max_input_tokens: 200000
+  openai_fast:
+    provider: openai
+    upstream_model: configured-openai-fast-model
+    protocol: openai_responses
+    state_scope: openai-default
+    tier: fast
+    capabilities: [streaming, tools, reasoning, vision, structured_output]
+    max_input_tokens: 200000
+  openai_balanced:
+    provider: openai
+    upstream_model: configured-openai-balanced-model
+    protocol: openai_responses
+    state_scope: openai-default
+    tier: balanced
+    capabilities: [streaming, tools, reasoning, vision, structured_output, response_state, provider_managed_tools]
+    max_input_tokens: 200000
+  openai_deep:
+    provider: openai
+    upstream_model: configured-openai-deep-model
+    protocol: openai_responses
+    state_scope: openai-default
+    tier: deep
+    capabilities: [streaming, tools, reasoning, vision, structured_output, response_state, provider_managed_tools]
     max_input_tokens: 200000
 
 profiles:
   code/auto:
     mode: auto
   code/fast:
-    primary: fast
-    fallback: [balanced]
+    targets:
+      anthropic_messages:
+        primary: anthropic_fast
+        fallback: [anthropic_balanced]
+      openai_responses:
+        primary: openai_fast
+        fallback: [openai_balanced]
   code/balanced:
-    primary: balanced
-    fallback: [deep]
+    targets:
+      anthropic_messages:
+        primary: anthropic_balanced
+        fallback: [anthropic_deep]
+      openai_responses:
+        primary: openai_balanced
+        fallback: [openai_deep]
   code/deep:
-    primary: deep
-    fallback: []
+    targets:
+      anthropic_messages:
+        primary: anthropic_deep
+        fallback: []
+      openai_responses:
+        primary: openai_deep
+        fallback: []
 
 routing:
   default_profile: code/auto

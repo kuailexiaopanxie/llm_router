@@ -45,7 +45,12 @@ class SQLiteEventStore:
                 input_tokens INTEGER,
                 output_tokens INTEGER,
                 estimated_cost REAL,
-                error_code TEXT
+                error_code TEXT,
+                inbound_protocol TEXT,
+                target_protocol TEXT,
+                provider_account_scope TEXT,
+                response_state_requested INTEGER NOT NULL DEFAULT 0,
+                translation_mode TEXT NOT NULL DEFAULT 'none'
             );
             CREATE TABLE IF NOT EXISTS route_attempts (
                 request_id TEXT NOT NULL,
@@ -61,7 +66,28 @@ class SQLiteEventStore:
             );
             """
         )
+        await self._ensure_columns(
+            "route_requests",
+            {
+                "inbound_protocol": "TEXT",
+                "target_protocol": "TEXT",
+                "provider_account_scope": "TEXT",
+                "response_state_requested": "INTEGER NOT NULL DEFAULT 0",
+                "translation_mode": "TEXT NOT NULL DEFAULT 'none'",
+            },
+        )
         await self._connection.commit()
+
+    async def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
+        """Add bounded telemetry columns when opening a v0.1 database."""
+
+        assert self._connection is not None
+        cursor = await self._connection.execute(f"PRAGMA table_info({table})")
+        existing = {row[1] for row in await cursor.fetchall()}
+        await cursor.close()
+        for name, definition in columns.items():
+            if name not in existing:
+                await self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     async def append(self, event: RouteEvent) -> None:
         """Persist one sanitized route event and its attempt summaries."""
@@ -74,8 +100,9 @@ class SQLiteEventStore:
             (request_id, received_at, protocol, profile, stream, feature_summary,
              primary_model, final_model, route_reason, policy_version, status,
              attempt_count, time_to_first_event_ms, total_latency_ms, input_tokens,
-             output_tokens, estimated_cost, error_code)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             output_tokens, estimated_cost, error_code, inbound_protocol, target_protocol,
+             provider_account_scope, response_state_requested, translation_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.request_id,
@@ -96,6 +123,11 @@ class SQLiteEventStore:
                 event.output_tokens,
                 event.estimated_cost,
                 event.error_code,
+                event.inbound_protocol,
+                event.target_protocol,
+                event.provider_account_scope,
+                int(event.response_state_requested),
+                event.translation_mode,
             ),
         )
         await self._connection.executemany(
@@ -127,4 +159,3 @@ class SQLiteEventStore:
         if self._connection is not None:
             await self._connection.close()
             self._connection = None
-

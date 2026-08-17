@@ -5,16 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from llm_router.domain import Capability, FeatureSummary, OutcomeSignal, RoutingRequest, TaskSignals
-
-
-def _bucket(value: int, limits: tuple[int, ...]) -> str:
-    """Map a count to a stable bounded range label."""
-
-    for limit in limits:
-        if value <= limit:
-            return f"le_{limit}"
-    return f"gt_{limits[-1]}"
+from llm_router.domain import Capability, OutcomeSignal, Protocol, RoutingRequest
+from llm_router.routing.feature_utils import bucket, classify_task_text
 
 
 def _text_blocks(value: Any) -> list[str]:
@@ -83,12 +75,7 @@ def extract_routing_request(
     system = body.get("system", [])
     system_text = "\n".join(_text_blocks(system))
     all_text = "\n".join(_text_blocks(messages) + [system_text]).lower()
-    task_signals = TaskSignals(
-        complex_planning=any(word in all_text for word in ("plan", "design", "architecture", "refactor")),
-        debugging=any(word in all_text for word in ("debug", "bug", "traceback", "regression")),
-        review=any(word in all_text for word in ("review", "audit", "inspect")),
-        multi_file_refactor=any(word in all_text for word in ("multi-file", "across files", "repository-wide")),
-    )
+    task_signals = classify_task_text(all_text)
     required: set[Capability] = set()
     if stream:
         required.add(Capability.STREAMING)
@@ -111,31 +98,11 @@ def extract_routing_request(
         estimated_input_tokens=estimated_tokens,
         message_count=len(messages),
         tool_rounds=tool_rounds,
-        system_size_bucket=_bucket(len(system_text), (4000, 16000, 64000)),
+        system_size_bucket=bucket(len(system_text), (4000, 16000, 64000)),
         task_signals=task_signals,
         outcome_signal=_outcome_signal(messages),
         session_id=session_id,
         stream=stream,
         count_only=count_only,
-    )
-
-
-def summarize_features(request: RoutingRequest) -> FeatureSummary:
-    """Convert routing features to a bounded persistence representation."""
-
-    signal_count = sum(
-        (
-            request.task_signals.complex_planning,
-            request.task_signals.debugging,
-            request.task_signals.review,
-            request.task_signals.multi_file_refactor,
-        )
-    )
-    return FeatureSummary(
-        required_capabilities=tuple(sorted(cap.value for cap in request.required_capabilities)),
-        input_size_bucket=_bucket(request.estimated_input_tokens, (8000, 64000, 200000)),
-        message_count_bucket=_bucket(request.message_count, (4, 12, 40)),
-        tool_rounds_bucket=_bucket(request.tool_rounds, (0, 2, 5)),
-        outcome_signal=request.outcome_signal.value,
-        task_signal_count=signal_count,
+        protocol=Protocol.ANTHROPIC_MESSAGES,
     )

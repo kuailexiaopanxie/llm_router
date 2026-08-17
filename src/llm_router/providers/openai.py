@@ -1,4 +1,4 @@
-"""Direct httpx adapter for the Anthropic Messages API."""
+"""Direct httpx adapter for the OpenAI Responses API."""
 
 from __future__ import annotations
 
@@ -12,39 +12,33 @@ from llm_router.domain import ProviderExchange, ProviderRequest
 from llm_router.gateway.errors import RouterError
 
 
-_FORWARDED_HEADERS = {
-    "anthropic-version",
-    "anthropic-beta",
-    "content-type",
-    "accept",
-}
+_FORWARDED_HEADERS = {"content-type", "accept"}
 
 
-class AnthropicProvider:
-    """Provider adapter that preserves unknown JSON fields and SSE bytes."""
+class OpenAIProvider:
+    """Provider adapter that preserves Responses JSON fields and SSE bytes."""
 
     def __init__(self, config: ProviderConfig, api_key: str) -> None:
+        """Initialize one OpenAI upstream connection pool."""
+
         self._config = config
         self._api_key = api_key
         self._client = httpx.AsyncClient(base_url=config.base_url.rstrip("/"))
         self._semaphore = asyncio.Semaphore(config.max_concurrency)
 
     def _headers(self, incoming: Mapping[str, str]) -> dict[str, str]:
-        """Filter client headers and inject upstream authentication."""
+        """Filter client headers and inject provider Bearer authentication."""
 
         allowed = _FORWARDED_HEADERS | {item.lower() for item in self._config.extension_headers}
         headers = {key: value for key, value in incoming.items() if key.lower() in allowed}
         headers.pop("authorization", None)
         headers.pop("x-api-key", None)
-        if self._config.auth_scheme == "bearer":
-            headers["authorization"] = f"Bearer {self._api_key}"
-        else:
-            headers["x-api-key"] = self._api_key
+        headers["authorization"] = f"Bearer {self._api_key}"
         headers.setdefault("content-type", "application/json")
         return headers
 
     async def invoke(self, request: ProviderRequest) -> ProviderExchange:
-        """Open one request while bounding provider concurrency."""
+        """Open one Responses request while bounding provider concurrency."""
 
         await self._semaphore.acquire()
         body = dict(request.envelope.raw_body)
@@ -59,7 +53,7 @@ class AnthropicProvider:
         try:
             outbound = self._client.build_request(
                 "POST",
-                "/v1/messages/count_tokens" if request.envelope.endpoint.endswith("count_tokens") else "/v1/messages",
+                "/v1/responses",
                 headers=self._headers(request.envelope.safe_headers),
                 json=body,
                 timeout=timeout,
