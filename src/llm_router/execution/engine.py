@@ -12,11 +12,20 @@ from llm_router.domain import (
     AttemptEvent,
     ExecutionPlan,
     ExecutionStats,
+    Protocol,
     ProtocolEnvelope,
     ProviderExchange,
     ProviderRequest,
     ProxyResponse,
-    Protocol,
+)
+from llm_router.errors import (
+    RouterError,
+    cancelled_error,
+    no_available_target,
+    response_header_timeout,
+    timeout_error,
+    upstream_exhausted,
+    upstream_rejected,
 )
 from llm_router.execution.failures import (
     FailureDecision,
@@ -26,16 +35,12 @@ from llm_router.execution.failures import (
 )
 from llm_router.execution.stream_semantics import StreamSemantics
 from llm_router.execution.streaming import read_first_event, relay_stream
-from llm_router.gateway.errors import (
-    RouterError,
-    cancelled_error,
-    no_available_target,
-    response_header_timeout,
-    timeout_error,
-    upstream_exhausted,
-    upstream_rejected,
+from llm_router.health.models import (
+    AttemptOutcome,
+    AvailabilitySnapshot,
+    FailureClass,
+    HealthLease,
 )
-from llm_router.health.models import AttemptOutcome, AvailabilitySnapshot, FailureClass
 from llm_router.health.port import HealthPort
 from llm_router.providers.port import ProviderFailure, ProviderPort
 
@@ -74,13 +79,13 @@ class ExecutionEngine:
         return None
 
     async def _json_body(
-        self, exchange: ProviderExchange, deadline: float, response_header_timeout: float
+        self, exchange: ProviderExchange, deadline: float, header_timeout: float
     ) -> bytes:
         """Collect a non-stream response before committing bytes downstream."""
 
         chunks: list[bytes] = []
         iterator = exchange.body.__aiter__()
-        first_deadline = min(deadline, time.monotonic() + response_header_timeout)
+        first_deadline = min(deadline, time.monotonic() + header_timeout)
         first_chunk = True
         while True:
             remaining = (first_deadline if first_chunk else deadline) - time.monotonic()
@@ -155,15 +160,21 @@ class ExecutionEngine:
             lease_recorded = False
             failure_decision: FailureDecision | None = None
             upstream_http_status: int | None = None
+            admitted_lease = lease
+            assert admitted_lease is not None
 
-            def record_lease(outcome: AttemptOutcome) -> None:
+            def record_lease(
+                outcome: AttemptOutcome,
+                bound_lease: HealthLease | None = admitted_lease,
+            ) -> None:
                 """Apply one admitted attempt outcome at most once."""
 
                 nonlocal lease_recorded
+                assert bound_lease is not None
                 if lease_recorded:
                     return
                 lease_recorded = True
-                self._health.record(lease, outcome)
+                self._health.record(bound_lease, outcome)
 
             try:
                 provider = self._providers[target.provider]
@@ -340,7 +351,8 @@ class ExecutionEngine:
                         failure_decision.retry_after_seconds,
                     )
                 )
-            except Exception:
+            # Provider adapters form an isolation boundary for unknown transport errors.
+            except Exception:  # noqa: BLE001
                 if exchange is not None:
                     await exchange.close()
                 failure_class = FailureClass.PROVIDER_TRANSIENT

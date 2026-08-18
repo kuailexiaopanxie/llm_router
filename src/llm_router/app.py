@@ -6,7 +6,7 @@ import argparse
 import json
 import logging
 import sys
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,17 +16,30 @@ from fastapi.responses import JSONResponse, Response
 
 from llm_router.config import RouterConfig, load_config
 from llm_router.domain import ModelTarget, Protocol
+from llm_router.errors import not_ready
+from llm_router.evaluation.codec import make_policy_snapshot
+from llm_router.evaluation.outcomes import OutcomeService
+from llm_router.evaluation.recorder import DecisionRecorder, NoopDecisionRecorder
+from llm_router.evaluation.sqlite_store import SQLiteEvaluationStore
 from llm_router.execution.engine import ExecutionEngine
-from llm_router.execution.stream_semantics import AnthropicStreamSemantics, OpenAIStreamSemantics
+from llm_router.execution.stream_semantics import (
+    AnthropicStreamSemantics,
+    OpenAIStreamSemantics,
+)
 from llm_router.gateway.anthropic import AnthropicGateway
-from llm_router.gateway.errors import not_ready
 from llm_router.gateway.openai import OpenAIResponsesGateway
+from llm_router.gateway.outcomes import register_outcome_route
 from llm_router.gateway.renderers import AnthropicErrorRenderer
-from llm_router.health.coordinator import DisabledHealthCoordinator, InMemoryHealthCoordinator
+from llm_router.health.coordinator import (
+    DisabledHealthCoordinator,
+    InMemoryHealthCoordinator,
+)
 from llm_router.health.models import AvailabilitySnapshot, HealthTransition
 from llm_router.health.port import HealthPort
 from llm_router.providers.registry import ProviderRegistry
+from llm_router.routing.coordinator import RoutingCoordinator
 from llm_router.routing.kernel import RoutingKernel
+from llm_router.routing.policy import compile_routing_policy
 from llm_router.routing.session import SessionStateStore
 from llm_router.telemetry.metrics import RouterMetrics
 from llm_router.telemetry.recorder import TelemetryRecorder
@@ -53,7 +66,7 @@ class JsonLogFormatter(logging.Formatter):
             "to_state": getattr(record, "to_state", None),
             "failure_class": getattr(record, "failure_class", None),
         }
-        if record.exc_info:
+        if record.exc_info and record.exc_info[0] is not None:
             payload["exception_type"] = record.exc_info[0].__name__
         return json.dumps(payload, separators=(",", ":"))
 
@@ -83,6 +96,9 @@ class Runtime:
     telemetry: TelemetryRecorder
     metrics: RouterMetrics
     health: HealthPort
+    coordinator: RoutingCoordinator
+    evaluation: SQLiteEvaluationStore | None
+    decision_recorder: DecisionRecorder | None
     ready: bool = False
 
 
@@ -140,6 +156,7 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
     sessions = SessionStateStore(config.routing.session_ttl_seconds, config.routing.session_capacity)
     metrics = RouterMetrics()
     metrics.initialize_health(targets)
+    health: HealthPort
     if config.health.enabled:
         health_reference: dict[str, HealthPort] = {}
 
@@ -159,6 +176,20 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
     telemetry = TelemetryRecorder(
         SQLiteEventStore(config.storage.sqlite_path), metrics, config.storage.queue_capacity
     )
+    evaluation = (
+        SQLiteEvaluationStore(config.storage.sqlite_path)
+        if config.outcomes.enabled or config.replay.capture_enabled
+        else None
+    )
+    decision_recorder = (
+        DecisionRecorder(evaluation, config.storage.queue_capacity, metrics)
+        if config.replay.capture_enabled and evaluation is not None
+        else None
+    )
+    recorder = decision_recorder or NoopDecisionRecorder()
+    policy = compile_routing_policy(config)
+    kernel = RoutingKernel(policy)
+    coordinator = RoutingCoordinator(kernel, sessions, health, recorder)
     runtime = Runtime(
         config=config,
         client_key=client_key,
@@ -172,30 +203,54 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
             health,
             config.health.max_cooldown_seconds,
         ),
-        kernel=RoutingKernel(config, sessions),
+        kernel=kernel,
         sessions=sessions,
         telemetry=telemetry,
         metrics=metrics,
         health=health,
+        coordinator=coordinator,
+        evaluation=evaluation,
+        decision_recorder=decision_recorder,
     )
     anthropic_gateway = AnthropicGateway(runtime)
     openai_gateway = OpenAIResponsesGateway(runtime)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI):
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         """Start and stop telemetry/providers with a bounded shutdown drain."""
 
         await runtime.telemetry.start()
+        if runtime.evaluation is not None:
+            await runtime.evaluation.start()
+        if runtime.decision_recorder is not None and runtime.evaluation is not None:
+            await runtime.evaluation.ensure_policy(make_policy_snapshot(config, datetime.now(timezone.utc)))
+            await runtime.decision_recorder.start()
         runtime.ready = True
         try:
             yield
         finally:
             runtime.ready = False
+            if runtime.decision_recorder is not None:
+                await runtime.decision_recorder.close()
+            if runtime.evaluation is not None:
+                await runtime.evaluation.close()
             await runtime.telemetry.close()
             await runtime.providers.close()
 
-    app = FastAPI(title="Coding LLM Router", version="0.3.0", lifespan=lifespan)
+    app = FastAPI(title="Coding LLM Router", version="0.4.0", lifespan=lifespan)
     app.state.runtime = runtime
+    if config.outcomes.enabled and evaluation is not None:
+        register_outcome_route(
+            app,
+            OutcomeService(
+                evaluation,
+                config.outcomes.max_event_age_seconds,
+                config.outcomes.max_future_skew_seconds,
+            ),
+            client_key,
+            config.outcomes.max_request_bytes,
+            metrics,
+        )
 
     @app.post("/v1/messages")
     async def messages(request: Request) -> Response:
@@ -216,7 +271,7 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
         return await openai_gateway.handle(request)
 
     @app.get("/health")
-    async def health() -> dict[str, str]:
+    async def health_endpoint() -> dict[str, str]:
         """Return process liveness without checking dependencies."""
 
         return {"status": "ok"}
@@ -231,7 +286,7 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
         return JSONResponse({"status": "ready"})
 
     @app.get("/metrics")
-    async def metrics() -> Response:
+    async def metrics_endpoint() -> Response:
         """Expose local Prometheus metrics."""
 
         return Response(content=runtime.metrics.render(), media_type="text/plain; version=0.0.4")

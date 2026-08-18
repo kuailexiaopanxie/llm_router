@@ -53,6 +53,22 @@ class StorageConfig(StrictModel):
     queue_capacity: int = Field(default=2048, ge=1, le=100_000)
 
 
+class OutcomesConfig(StrictModel):
+    """Bounded synchronous Outcome Event intake settings."""
+
+    enabled: bool = True
+    max_request_bytes: int = Field(default=16_384, ge=1_024, le=65_536)
+    max_event_age_seconds: int = Field(default=604_800, ge=60, le=2_592_000)
+    max_future_skew_seconds: int = Field(default=300, ge=0, le=3_600)
+
+
+class ReplayConfig(StrictModel):
+    """Bounded offline replay settings."""
+
+    capture_enabled: bool = True
+    max_records: int = Field(default=10_000, ge=1, le=100_000)
+
+
 class HealthConfig(StrictModel):
     """Bounded in-memory Provider and Model Target health policy."""
 
@@ -208,6 +224,8 @@ class RouterConfig(StrictModel):
     version: Literal[1]
     server: ServerConfig
     storage: StorageConfig
+    outcomes: OutcomesConfig = Field(default_factory=OutcomesConfig)
+    replay: ReplayConfig = Field(default_factory=ReplayConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     providers: dict[str, ProviderConfig]
     models: dict[str, ModelConfig]
@@ -284,11 +302,17 @@ class RouterConfig(StrictModel):
         return self
 
     @property
-    def policy_hash(self) -> str:
+    def config_hash(self) -> str:
         """Return a stable hash of the effective non-secret configuration."""
 
         canonical = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode()).hexdigest()[:12]
+
+    @property
+    def policy_hash(self) -> str:
+        """Return the legacy compatibility alias for ``config_hash``."""
+
+        return self.config_hash
 
     @property
     def effective_policy_version(self) -> str:
@@ -347,5 +371,5 @@ def load_config(path: str | Path) -> RouterConfig:
     with config_path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle)
     if not isinstance(raw, dict):
-        raise ValueError("router configuration must be a YAML mapping")
+        raise TypeError("router configuration must be a YAML mapping")
     return RouterConfig.model_validate(raw)

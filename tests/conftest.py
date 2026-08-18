@@ -10,7 +10,12 @@ from typing import Any
 import pytest
 
 from llm_router.config import RouterConfig
-from llm_router.domain import Protocol, ProtocolEnvelope, ProviderExchange, ProviderRequest
+from llm_router.domain import (
+    Protocol,
+    ProtocolEnvelope,
+    ProviderExchange,
+    ProviderRequest,
+)
 
 
 @dataclass(frozen=True, slots=True)

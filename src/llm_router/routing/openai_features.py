@@ -60,9 +60,7 @@ def _outcome_signal(input_value: Any) -> OutcomeSignal:
     return OutcomeSignal.SUCCESS if found_output else OutcomeSignal.UNKNOWN
 
 
-def extract_routing_request(
-    body: Mapping[str, Any], requested_profile: str, session_id: str | None
-) -> RoutingRequest:
+def extract_routing_request(body: Mapping[str, Any], requested_profile: str) -> RoutingRequest:
     """Build a routing request from a validated-but-preserved Responses body."""
 
     input_value = body.get("input", "")
@@ -120,7 +118,6 @@ def extract_routing_request(
         system_size_bucket=bucket(len(instructions) if isinstance(instructions, str) else 0, (4000, 16000, 64000)),
         task_signals=classify_task_text(text),
         outcome_signal=_outcome_signal(input_value),
-        session_id=session_id,
         stream=stream,
         protocol=Protocol.OPENAI_RESPONSES,
         response_state_requested=response_state_requested,

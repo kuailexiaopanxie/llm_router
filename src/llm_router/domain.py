@@ -81,7 +81,6 @@ class RoutingRequest:
     system_size_bucket: str
     task_signals: TaskSignals
     outcome_signal: OutcomeSignal
-    session_id: str | None
     stream: bool
     count_only: bool = False
     protocol: Protocol = Protocol.ANTHROPIC_MESSAGES
@@ -246,3 +245,4 @@ class RouteEvent:
     health_filtered_count: int = 0
     health_skipped_count: int = 0
     health_reason: str | None = None
+    task_id: str | None = None

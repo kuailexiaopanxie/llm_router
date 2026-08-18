@@ -44,7 +44,7 @@ def _outcome_signal(messages: Sequence[Any]) -> OutcomeSignal:
 
 
 def extract_routing_request(
-    body: Mapping[str, Any], requested_profile: str, session_id: str | None, count_only: bool = False
+    body: Mapping[str, Any], requested_profile: str, count_only: bool = False
 ) -> RoutingRequest:
     """Build a routing request from a validated-but-preserved Anthropic body."""
 
@@ -63,9 +63,13 @@ def extract_routing_request(
             continue
         role = message.get("role")
         content = message.get("content", [])
-        if role == "assistant" and isinstance(content, Sequence) and not isinstance(content, str):
-            if any(isinstance(block, Mapping) and block.get("type") == "tool_use" for block in content):
-                tool_rounds += 1
+        if (
+            role == "assistant"
+            and isinstance(content, Sequence)
+            and not isinstance(content, str)
+            and any(isinstance(block, Mapping) and block.get("type") == "tool_use" for block in content)
+        ):
+            tool_rounds += 1
         if isinstance(content, Sequence) and not isinstance(content, (str, bytes, bytearray)):
             has_vision = has_vision or any(
                 isinstance(block, Mapping)
@@ -101,7 +105,6 @@ def extract_routing_request(
         system_size_bucket=bucket(len(system_text), (4000, 16000, 64000)),
         task_signals=task_signals,
         outcome_signal=_outcome_signal(messages),
-        session_id=session_id,
         stream=stream,
         count_only=count_only,
         protocol=Protocol.ANTHROPIC_MESSAGES,

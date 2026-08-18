@@ -5,13 +5,15 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
-from llm_router.config import HealthConfig, RouterConfig
-from llm_router.domain import ModelTarget
-from llm_router.health.coordinator import DisabledHealthCoordinator, InMemoryHealthCoordinator
-from llm_router.health.models import AttemptOutcome, FailureClass, HealthState
-
 from conftest import router_config_data
 
+from llm_router.config import HealthConfig, RouterConfig
+from llm_router.domain import ModelTarget
+from llm_router.health.coordinator import (
+    DisabledHealthCoordinator,
+    InMemoryHealthCoordinator,
+)
+from llm_router.health.models import AttemptOutcome, FailureClass, HealthState
 
 NOW = datetime(2026, 8, 18, tzinfo=UTC)
 

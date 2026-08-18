@@ -8,10 +8,9 @@ from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 
 from llm_router.domain import ExecutionStats, ProviderExchange
+from llm_router.errors import RouterError, timeout_error
 from llm_router.execution.stream_semantics import StreamSemantics
-from llm_router.gateway.errors import RouterError, timeout_error
 from llm_router.health.models import AttemptOutcome, FailureClass
-
 
 _MAX_USAGE_EVENT_BYTES = 4 * 1024 * 1024
 
@@ -198,7 +197,8 @@ async def relay_stream(
                 )
             )
         yield semantics.render_post_commit_error(exc.code)
-    except Exception:
+    # The committed stream cannot propagate arbitrary iterator failures downstream.
+    except Exception:  # noqa: BLE001
         finish(FailureClass.POST_COMMIT_STREAM_FAILURE)
         if not completion.done():
             completion.set_result(

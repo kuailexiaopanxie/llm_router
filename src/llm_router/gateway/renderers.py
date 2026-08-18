@@ -8,7 +8,7 @@ from typing import Protocol
 
 from fastapi.responses import JSONResponse
 
-from llm_router.gateway.errors import RouterError
+from llm_router.errors import RouterError
 
 
 def _error_headers(error: RouterError, request_id: str) -> dict[str, str]:

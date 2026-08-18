@@ -6,8 +6,12 @@ import json
 from collections.abc import Mapping
 from typing import Protocol
 
-from llm_router.gateway.errors import RouterError
-from llm_router.gateway.renderers import AnthropicErrorRenderer, ErrorRenderer, OpenAIErrorRenderer
+from llm_router.errors import RouterError
+from llm_router.gateway.renderers import (
+    AnthropicErrorRenderer,
+    ErrorRenderer,
+    OpenAIErrorRenderer,
+)
 from llm_router.health.models import FailureClass
 
 
@@ -38,7 +42,7 @@ def _event_payload(event: bytes) -> Mapping[str, object]:
         raise ValueError("SSE event has no data field")
     value = json.loads(b"\n".join(data_lines))
     if not isinstance(value, Mapping):
-        raise ValueError("SSE data must be a JSON object")
+        raise TypeError("SSE data must be a JSON object")
     return value
 
 

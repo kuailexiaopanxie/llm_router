@@ -7,12 +7,14 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
 
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
 from llm_router.domain import Protocol, ProtocolEnvelope
-from llm_router.gateway.auth import authenticate, request_id, safe_headers
+from llm_router.errors import RouterError, invalid_request
+from llm_router.gateway.auth import authenticate, request_id, safe_headers, task_id
 from llm_router.gateway.common import (
     provider_extension_headers,
     read_json_object,
@@ -20,8 +22,8 @@ from llm_router.gateway.common import (
     record_route_failure,
     route_headers,
 )
-from llm_router.gateway.errors import RouterError, invalid_request
 from llm_router.gateway.renderers import OpenAIErrorRenderer
+from llm_router.routing.coordinator import RoutingInvocation
 from llm_router.routing.openai_features import extract_routing_request
 
 
@@ -63,6 +65,7 @@ class OpenAIResponsesGateway:
         routing_request = None
         availability = None
         plan = None
+        task = None
         try:
             authenticate(request.headers, runtime.client_key)
             stage = "read_request"
@@ -71,6 +74,8 @@ class OpenAIResponsesGateway:
             if not isinstance(model, str) or not model:
                 raise invalid_request("The model field must be a configured string.")
             protocol = Protocol.OPENAI_RESPONSES
+            task = task_id(request.headers)
+            session_id = request.headers.get("x-llm-router-session-id")
             envelope = ProtocolEnvelope(
                 request_id=rid,
                 protocol=protocol,
@@ -81,19 +86,22 @@ class OpenAIResponsesGateway:
                 endpoint="/v1/responses",
             )
             stage = "route"
-            routing_request = extract_routing_request(
-                body,
-                model,
-                request.headers.get("x-llm-router-session-id"),
-            )
-            availability = runtime.health.snapshot(datetime.now(timezone.utc))
-            plan = runtime.kernel.plan(routing_request, availability)
+            routing_request = extract_routing_request(body, model)
+            if hasattr(runtime, "coordinator"):
+                plan = runtime.coordinator.plan(
+                    RoutingInvocation(UUID(rid), UUID(task) if task else None, session_id, envelope.received_at, routing_request)
+                )
+            else:
+                availability = runtime.health.snapshot(datetime.now(timezone.utc))
+                plan = runtime.kernel.plan(routing_request, availability)
             stage = "execute"
             response = await runtime.engine.execute(envelope, plan)
             stage = "build_response"
             headers = route_headers(envelope, plan, response)
             asyncio.create_task(
-                record_completion(runtime, envelope, routing_request, plan, response, self._usage)
+                record_completion(
+                    runtime, envelope, routing_request, plan, response, self._usage, task, session_id
+                )
             )
             headers.update(response.headers)
             if isinstance(response.body, bytes):
@@ -114,7 +122,6 @@ class OpenAIResponsesGateway:
                 error.code == "router_no_available_target"
                 and envelope is not None
                 and routing_request is not None
-                and availability is not None
             ):
                 record_route_failure(
                     runtime,
@@ -123,6 +130,7 @@ class OpenAIResponsesGateway:
                     availability,
                     error,
                     plan,
+                    task,
                 )
             return self._errors.json_error(error, rid)
         except Exception:

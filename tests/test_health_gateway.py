@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+from conftest import envelope
 from fastapi import Request
 
 from llm_router.config import HealthConfig, RouterConfig
@@ -19,9 +20,7 @@ from llm_router.health.coordinator import InMemoryHealthCoordinator
 from llm_router.health.models import AttemptOutcome, FailureClass
 from llm_router.health.port import HealthPort
 from llm_router.routing.kernel import RoutingKernel
-from llm_router.routing.session import SessionStateStore
-
-from conftest import envelope
+from llm_router.routing.policy import compile_routing_policy
 
 
 def _request(path: str, body: dict[str, Any]) -> Request:
@@ -69,7 +68,7 @@ def _runtime(
         config=config,
         client_key="local-token",
         health=health,
-        kernel=RoutingKernel(config, SessionStateStore(60, 100)),
+        kernel=RoutingKernel(compile_routing_policy(config)),
         engine=SimpleNamespace(execute=execute),
         telemetry=SimpleNamespace(record=events.append),
         sessions=SimpleNamespace(record=lambda *items: session_calls.append(items)),
@@ -160,7 +159,7 @@ def test_unknown_provider_exchange_does_not_update_session(router_config: Router
     health = DisabledHealthCoordinator(router_config.model_targets())
     runtime = _runtime(router_config, health, events, session_calls)
     body = {"messages": [{"role": "user", "content": "hi"}]}
-    request = extract_routing_request(body, "code/fast", "session-1")
+    request = extract_routing_request(body, "code/fast")
     now = datetime.now(timezone.utc)
     plan = runtime.kernel.plan(request, health.snapshot(now))
 
@@ -185,6 +184,7 @@ def test_unknown_provider_exchange_does_not_update_session(router_config: Router
             plan=plan,
             response=response,
             usage_extractor=lambda _: (None, None),
+            session_key="session-1",
         )
 
     asyncio.run(record(OutcomeSignal.UNKNOWN))

@@ -13,14 +13,16 @@ from llm_router.health.coordinator import InMemoryHealthCoordinator
 from llm_router.health.models import AttemptOutcome, FailureClass
 from llm_router.routing.features import extract_routing_request as anthropic_features
 from llm_router.routing.kernel import RoutingKernel
-from llm_router.routing.openai_features import extract_routing_request as openai_features
-from llm_router.routing.session import SessionStateStore
+from llm_router.routing.openai_features import (
+    extract_routing_request as openai_features,
+)
+from llm_router.routing.policy import compile_routing_policy
 
 
 def _kernel(config: RouterConfig) -> RoutingKernel:
     """Build a routing kernel without prior session state."""
 
-    return RoutingKernel(config, SessionStateStore(60, 100))
+    return RoutingKernel(compile_routing_policy(config))
 
 
 def _fail_target(
@@ -51,7 +53,6 @@ def test_target_cooldown_preserves_protocol_and_uses_tier_fallback(
     request = anthropic_features(
         {"messages": [{"role": "user", "content": "hello"}]},
         "code/auto",
-        None,
     )
 
     plan = _kernel(router_config).plan(request, health.snapshot(now))
@@ -74,7 +75,7 @@ def test_all_capable_targets_unavailable_returns_503(router_config: RouterConfig
         FailureClass.PROVIDER_PERMANENT,
         now,
     )
-    request = openai_features({"input": "hello"}, "code/auto", None)
+    request = openai_features({"input": "hello"}, "code/auto")
 
     with pytest.raises(RouterError) as captured:
         _kernel(router_config).plan(request, health.snapshot(now))
@@ -97,7 +98,6 @@ def test_health_filter_does_not_remove_capability_requirements(
             "thinking": {"type": "enabled", "budget_tokens": 1024},
         },
         "code/fast",
-        None,
     )
 
     plan = _kernel(router_config).plan(request, health.snapshot(now))

@@ -14,7 +14,6 @@ from llm_router.execution.failures import (
 )
 from llm_router.health.models import FailureClass
 
-
 NOW = datetime(2026, 8, 18, tzinfo=UTC)
 
 

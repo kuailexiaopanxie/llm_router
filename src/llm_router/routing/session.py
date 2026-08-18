@@ -7,6 +7,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 from llm_router.domain import OutcomeSignal, Tier
+from llm_router.routing.context import SessionSnapshot
 
 
 @dataclass
@@ -50,6 +51,19 @@ class SessionStateStore:
         state = self._get(session_id)
         return SessionState(**state.__dict__)
 
+    def routing_snapshot(self, session_id: str | None) -> SessionSnapshot | None:
+        """Return only the immutable fields consumed by the routing kernel."""
+
+        state = self.snapshot(session_id)
+        if state is None:
+            return None
+        return SessionSnapshot(
+            last_tier=state.last_tier,
+            last_outcome=state.last_outcome,
+            consecutive_failures=state.consecutive_failures,
+            requests_since_failure=state.requests_since_failure,
+        )
+
     def record(self, session_id: str | None, tier: Tier, outcome: OutcomeSignal) -> None:
         """Update failure escalation state after a completed request."""
 
@@ -69,4 +83,3 @@ class SessionStateStore:
             if state.requests_since_failure >= 2:
                 state.consecutive_failures = max(0, state.consecutive_failures - 1)
                 state.requests_since_failure = 0
-

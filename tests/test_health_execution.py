@@ -6,26 +6,28 @@ import asyncio
 from datetime import datetime, timezone
 
 import pytest
+from conftest import ExchangeSpec, FakeProviderPort, envelope, router_config_data
 
 from llm_router.config import HealthConfig, RouterConfig
 from llm_router.domain import Protocol, ProxyResponse, RoutingRequest
 from llm_router.execution.engine import ExecutionEngine
-from llm_router.execution.stream_semantics import AnthropicStreamSemantics, OpenAIStreamSemantics
+from llm_router.execution.stream_semantics import (
+    AnthropicStreamSemantics,
+    OpenAIStreamSemantics,
+)
 from llm_router.gateway.errors import RouterError
 from llm_router.health.coordinator import InMemoryHealthCoordinator
 from llm_router.health.models import AttemptOutcome, FailureClass
 from llm_router.providers.port import ProviderFailure
 from llm_router.routing.features import extract_routing_request
 from llm_router.routing.kernel import RoutingKernel
-from llm_router.routing.session import SessionStateStore
-
-from conftest import ExchangeSpec, FakeProviderPort, envelope, router_config_data
+from llm_router.routing.policy import compile_routing_policy
 
 
 def _kernel(config: RouterConfig) -> RoutingKernel:
     """Build a routing kernel without prior session state."""
 
-    return RoutingKernel(config, SessionStateStore(60, 100))
+    return RoutingKernel(compile_routing_policy(config))
 
 
 def _engine(
@@ -52,7 +54,6 @@ def _request() -> RoutingRequest:
     return extract_routing_request(
         {"messages": [{"role": "user", "content": "hello"}]},
         "code/fast",
-        None,
     )
 
 
@@ -110,12 +111,14 @@ def test_sse_requires_protocol_terminal_event_for_success(
     health = InMemoryHealthCoordinator(router_config.health, router_config.model_targets())
     if protocol is Protocol.ANTHROPIC_MESSAGES:
         body = {"messages": [{"role": "user", "content": "hello"}], "stream": True}
-        request = extract_routing_request(body, "code/fast", None)
+        request = extract_routing_request(body, "code/fast")
     else:
-        from llm_router.routing.openai_features import extract_routing_request as openai_request
+        from llm_router.routing.openai_features import (
+            extract_routing_request as openai_request,
+        )
 
         body = {"input": "hello", "stream": True}
-        request = openai_request(body, "code/fast", None)
+        request = openai_request(body, "code/fast")
     plan = _kernel(router_config).plan(request, health.snapshot(now))
     first = b'event: start\ndata: {"type":"start"}\n\n'
     provider = FakeProviderPort(
@@ -152,7 +155,7 @@ def test_incomplete_committed_stream_fails_without_fallback(
         router_config.model_targets(),
     )
     body = {"messages": [{"role": "user", "content": "hello"}], "stream": True}
-    request = extract_routing_request(body, "code/fast", None)
+    request = extract_routing_request(body, "code/fast")
     plan = _kernel(router_config).plan(request, health.snapshot(now))
     first = b'event: message_start\ndata: {"type":"message_start"}\n\n'
     provider = FakeProviderPort(
@@ -314,7 +317,7 @@ def test_client_stream_close_is_health_neutral(router_config: RouterConfig) -> N
         router_config.model_targets(),
     )
     body = {"messages": [{"role": "user", "content": "hello"}], "stream": True}
-    request = extract_routing_request(body, "code/fast", None)
+    request = extract_routing_request(body, "code/fast")
     plan = _kernel(router_config).plan(
         request,
         health.snapshot(datetime.now(timezone.utc)),

@@ -23,7 +23,6 @@ from llm_router.health.models import (
     TargetAvailability,
 )
 
-
 TransitionObserver = Callable[[HealthTransition], None]
 
 
@@ -182,7 +181,8 @@ class InMemoryHealthCoordinator:
         for transition in transitions:
             try:
                 self._observer(transition)
-            except Exception:
+            # Observers are explicitly best-effort and cannot affect health state.
+            except Exception:  # noqa: BLE001, S112
                 continue
 
     def acquire(self, target: ModelTarget, now: datetime) -> HealthLease | None:

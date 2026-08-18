@@ -41,3 +41,29 @@ _Avoid_: ping, active health check.
 **Attempt Outcome**:
 A sanitized classification of one upstream execution, including success, transient failure, permanent failure, cancellation, or post-commit stream failure. It is used for health updates and telemetry, not task-quality judgment.
 _Avoid_: task result, model score.
+
+## Feedback And Evaluation
+
+**Outcome Signal**:
+A transient, conservative success or failure indication extracted from protocol input such as an explicit tool result. It may influence the current routing context but is not a durable evaluation label.
+_Avoid_: Outcome Event, task result.
+
+**Outcome Event**:
+An immutable, authenticated, bounded piece of evidence about the observed result of a prior routed request. It is evaluation data, not Provider health and not a command to change routing.
+_Avoid_: Attempt Outcome, quality score, reward.
+
+**Task ID**:
+An optional client-generated opaque UUID that groups related routed requests and Outcome Events. It carries no task description and does not affect routing.
+_Avoid_: session ID, request ID, task name.
+
+**Route Decision Input**:
+A sanitized immutable record of the request facts, session snapshot, availability snapshot, and policy identity required to rerun one historical routing decision.
+_Avoid_: prompt snapshot, request body.
+
+**Routing Policy Snapshot**:
+A sanitized, versioned description of model targets, profiles, thresholds, and routing rules, excluding credentials and upstream connection details.
+_Avoid_: full configuration, Provider configuration.
+
+**Replay Result**:
+A hypothetical Execution Plan produced by evaluating a Route Decision Input with a selected Routing Policy Snapshot. It is not a claim about the answer, cost, latency, or Outcome that the hypothetical target would have produced.
+_Avoid_: prediction, quality verdict, counterfactual Outcome.

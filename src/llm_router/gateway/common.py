@@ -12,8 +12,14 @@ from typing import Any
 from fastapi import Request
 
 from llm_router.config import RouterConfig
-from llm_router.domain import ExecutionStats, OutcomeSignal, Protocol, ProtocolEnvelope, RouteEvent
-from llm_router.gateway.errors import RouterError, invalid_request
+from llm_router.domain import (
+    ExecutionStats,
+    OutcomeSignal,
+    Protocol,
+    ProtocolEnvelope,
+    RouteEvent,
+)
+from llm_router.errors import RouterError, invalid_request
 from llm_router.routing.feature_utils import summarize_features
 
 
@@ -72,6 +78,8 @@ async def record_completion(
     plan: Any,
     response: Any,
     usage_extractor: Callable[[bytes], tuple[int | None, int | None]],
+    task_id: str | None = None,
+    session_key: str | None = None,
 ) -> None:
     """Record bounded completion telemetry and opt-in session state."""
 
@@ -83,10 +91,11 @@ async def record_completion(
         status = stats.status
         outcome = routing_request.outcome_signal
         if outcome is not OutcomeSignal.UNKNOWN and not envelope.endpoint.endswith("count_tokens"):
-            runtime.sessions.record(routing_request.session_id, response.final_target.tier, outcome)
+            runtime.sessions.record(session_key, response.final_target.tier, outcome)
         runtime.telemetry.record(
             RouteEvent(
                 request_id=envelope.request_id,
+                task_id=task_id,
                 received_at=envelope.received_at,
                 protocol=envelope.protocol.value,
                 profile=plan.profile,
@@ -129,13 +138,14 @@ def record_route_failure(
     availability: Any,
     error: RouterError,
     plan: Any | None = None,
+    task_id: str | None = None,
 ) -> None:
     """Record a bounded no-available-target failure without session updates."""
 
     try:
         snapshot_revision = (
             error.health_snapshot_revision
-            or (plan.health_snapshot_revision if plan is not None else availability.revision)
+            or (plan.health_snapshot_revision if plan is not None else getattr(availability, "revision", 0))
         )
         filtered_count = (
             error.health_filtered_count
@@ -145,6 +155,7 @@ def record_route_failure(
         runtime.telemetry.record(
             RouteEvent(
                 request_id=envelope.request_id,
+                task_id=task_id,
                 received_at=envelope.received_at,
                 protocol=envelope.protocol.value,
                 profile=routing_request.requested_profile,

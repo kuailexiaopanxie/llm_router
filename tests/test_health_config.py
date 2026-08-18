@@ -5,11 +5,10 @@ from __future__ import annotations
 from copy import deepcopy
 
 import pytest
+from conftest import router_config_data
 from pydantic import ValidationError
 
 from llm_router.config import RouterConfig
-
-from conftest import router_config_data
 
 
 def test_missing_health_block_uses_v03_defaults() -> None:

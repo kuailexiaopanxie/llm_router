@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import re
 import secrets
 import uuid
 from collections.abc import Mapping
 
-from llm_router.gateway.errors import unauthorized
+from llm_router.errors import invalid_request, unauthorized
 
-
-_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _BASE_ALLOWED = {"anthropic-version", "anthropic-beta", "content-type", "accept"}
 
 
@@ -32,12 +29,21 @@ def authenticate(headers: Mapping[str, str], expected_token: str) -> None:
 
 
 def request_id(headers: Mapping[str, str]) -> str:
-    """Accept a bounded client request ID or generate a UUID4."""
+    """Generate a Router-owned UUID4 independent of client request IDs."""
 
-    candidate = headers.get("x-request-id")
-    if candidate and _REQUEST_ID.fullmatch(candidate):
-        return candidate
-    return uuid.uuid4().hex
+    return str(uuid.uuid4())
+
+
+def task_id(headers: Mapping[str, str]) -> str | None:
+    """Validate an optional opaque task UUID without forwarding it upstream."""
+
+    candidate = headers.get("x-llm-router-task-id")
+    if candidate is None:
+        return None
+    try:
+        return str(uuid.UUID(candidate))
+    except (ValueError, AttributeError) as exc:
+        raise invalid_request("The x-llm-router-task-id header must be a UUID.") from exc
 
 
 def safe_headers(headers: Mapping[str, str], extension_headers: tuple[str, ...] = ()) -> dict[str, str]:

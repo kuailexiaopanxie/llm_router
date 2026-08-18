@@ -28,61 +28,67 @@ health:
   backoff_multiplier: 2.0
 
 providers:
-  anthropic:
+  CPA:
     type: anthropic
-    base_url: https://api.anthropic.com
+    base_url: https://www.hi-code.cc
+    api_key_env: CPA_LLM_ROUTER_ANTHROPIC_API_KEY
+
+  moonshot:
+    type: anthropic
+    base_url: https://api.moonshot.cn/anthropic
     api_key_env: LLM_ROUTER_ANTHROPIC_API_KEY
-    auth_scheme: x_api_key
+    auth_scheme: bearer
     max_concurrency: 16
-  openai:
+
+  MoLiFang:
     type: openai
-    base_url: https://api.openai.com
+    base_url: https://molifangapi.com
     api_key_env: LLM_ROUTER_OPENAI_API_KEY
     auth_scheme: bearer
     max_concurrency: 16
 
 models:
   anthropic_fast:
-    provider: anthropic
-    upstream_model: configured-fast-model
+    provider: moonshot
+    upstream_model: kimi-k2.6
     tier: fast
     capabilities: [streaming, tools, prompt_cache]
     max_input_tokens: 200000
   anthropic_balanced:
-    provider: anthropic
-    upstream_model: configured-balanced-model
+    provider: CPA
+    upstream_model: claude-opus-4-6
     tier: balanced
     capabilities: [streaming, tools, thinking, vision, prompt_cache]
     max_input_tokens: 200000
   anthropic_deep:
-    provider: anthropic
-    upstream_model: configured-deep-model
+    provider: CPA
+    upstream_model: claude-opus-4-8
     tier: deep
     capabilities: [streaming, tools, thinking, vision, prompt_cache]
     max_input_tokens: 200000
   openai_fast:
-    provider: openai
-    upstream_model: configured-openai-fast-model
+    provider: MoLiFang
+    upstream_model: gpt-5.5
     protocol: openai_responses
     state_scope: openai-default
     tier: fast
-    capabilities: [streaming, tools, reasoning, vision, structured_output]
+    capabilities: [ streaming, tools, reasoning, vision, structured_output ]
     max_input_tokens: 200000
   openai_balanced:
-    provider: openai
-    upstream_model: configured-openai-balanced-model
+    provider: MoLiFang
+    upstream_model: gpt-5.6-sol
     protocol: openai_responses
     state_scope: openai-default
     tier: balanced
-    capabilities: [streaming, tools, reasoning, vision, structured_output, response_state, provider_managed_tools]
+    capabilities: [ streaming, tools, reasoning, vision, structured_output, response_state, provider_managed_tools ]
     max_input_tokens: 200000
   openai_deep:
-    provider: openai
-    upstream_model: configured-openai-deep-model
+    provider: MoLiFang
+    upstream_model: gpt-5.6-sol
     protocol: openai_responses
     state_scope: openai-default
     tier: deep
-    capabilities: [streaming, tools, reasoning, vision, structured_output, response_state, provider_managed_tools]
+    capabilities: [ streaming, tools, reasoning, vision, structured_output, response_state, provider_managed_tools ]
     max_input_tokens: 200000
 
 profiles:

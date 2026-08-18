@@ -29,6 +29,7 @@ class SQLiteEventStore:
             """
             CREATE TABLE IF NOT EXISTS route_requests (
                 request_id TEXT PRIMARY KEY,
+                task_id TEXT,
                 received_at TEXT NOT NULL,
                 protocol TEXT NOT NULL,
                 profile TEXT NOT NULL,
@@ -84,6 +85,7 @@ class SQLiteEventStore:
                 "health_filtered_count": "INTEGER NOT NULL DEFAULT 0",
                 "health_skipped_count": "INTEGER NOT NULL DEFAULT 0",
                 "health_reason": "TEXT",
+                "task_id": "TEXT",
             },
         )
         await self._connection.commit()
@@ -107,17 +109,18 @@ class SQLiteEventStore:
         await self._connection.execute(
             """
             INSERT OR REPLACE INTO route_requests
-            (request_id, received_at, protocol, profile, stream, feature_summary,
+            (request_id, task_id, received_at, protocol, profile, stream, feature_summary,
              primary_model, final_model, route_reason, policy_version, status,
              attempt_count, time_to_first_event_ms, total_latency_ms, input_tokens,
              output_tokens, estimated_cost, error_code, inbound_protocol, target_protocol,
              provider_account_scope, response_state_requested, translation_mode,
              health_enabled, health_snapshot_revision, health_filtered_count,
              health_skipped_count, health_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.request_id,
+                event.task_id,
                 event.received_at.isoformat(),
                 event.protocol,
                 event.profile,

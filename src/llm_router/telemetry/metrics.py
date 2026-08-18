@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 
 from llm_router.domain import ModelTarget, RouteEvent
 from llm_router.health.models import AvailabilitySnapshot, HealthState, HealthTransition
@@ -79,6 +85,24 @@ class RouterMetrics:
         self.health_update_failures = Counter(
             "llm_router_health_update_failures_total",
             "Best-effort health observer update failures",
+            registry=self.registry,
+        )
+        self.outcomes = Counter(
+            "llm_router_outcomes_total",
+            "Outcome submissions by bounded domain fields",
+            ["verdict", "evidence", "source", "status", "correlation"],
+            registry=self.registry,
+        )
+        self.outcome_rejected = Counter(
+            "llm_router_outcome_rejected_total",
+            "Rejected Outcome submissions",
+            ["reason"],
+            registry=self.registry,
+        )
+        self.decision_capture = Counter(
+            "llm_router_decision_capture_total",
+            "Decision capture lifecycle outcomes",
+            ["status"],
             registry=self.registry,
         )
         self._targets_by_provider: dict[str, tuple[tuple[str, str], ...]] = {}

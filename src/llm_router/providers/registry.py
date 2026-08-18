@@ -10,7 +10,6 @@ from llm_router.providers.anthropic import AnthropicProvider
 from llm_router.providers.openai import OpenAIProvider
 from llm_router.providers.port import ProviderPort
 
-
 ProviderAdapter = AnthropicProvider | OpenAIProvider
 
 

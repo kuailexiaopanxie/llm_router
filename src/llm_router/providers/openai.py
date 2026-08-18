@@ -12,7 +12,6 @@ from llm_router.domain import ProviderExchange, ProviderRequest
 from llm_router.health.models import FailureClass
 from llm_router.providers.port import ProviderFailure
 
-
 _FORWARDED_HEADERS = {"content-type", "accept"}
 
 

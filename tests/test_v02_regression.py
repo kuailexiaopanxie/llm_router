@@ -7,24 +7,28 @@ import json
 from datetime import datetime, timezone
 
 import pytest
+from conftest import ExchangeSpec, FakeProviderPort, envelope, router_config_data
 
 from llm_router.config import RouterConfig
 from llm_router.domain import ExecutionPlan, Protocol, ProxyResponse, RoutingRequest
 from llm_router.execution.engine import ExecutionEngine
-from llm_router.execution.stream_semantics import AnthropicStreamSemantics, OpenAIStreamSemantics
+from llm_router.execution.stream_semantics import (
+    AnthropicStreamSemantics,
+    OpenAIStreamSemantics,
+)
 from llm_router.health.coordinator import DisabledHealthCoordinator
 from llm_router.routing.features import extract_routing_request as anthropic_features
 from llm_router.routing.kernel import RoutingKernel
-from llm_router.routing.openai_features import extract_routing_request as openai_features
-from llm_router.routing.session import SessionStateStore
-
-from conftest import ExchangeSpec, FakeProviderPort, envelope, router_config_data
+from llm_router.routing.openai_features import (
+    extract_routing_request as openai_features,
+)
+from llm_router.routing.policy import compile_routing_policy
 
 
 def _kernel(config: RouterConfig) -> RoutingKernel:
     """Build a stateless routing kernel for one test."""
 
-    return RoutingKernel(config, SessionStateStore(60, 100))
+    return RoutingKernel(compile_routing_policy(config))
 
 
 def _health(config: RouterConfig) -> DisabledHealthCoordinator:
@@ -62,9 +66,9 @@ def test_protocol_hard_filter_and_capability_equivalent_fallback(router_config: 
 
     kernel = _kernel(router_config)
     anthropic = anthropic_features(
-        {"messages": [{"role": "user", "content": "hello"}]}, "code/auto", None
+        {"messages": [{"role": "user", "content": "hello"}]}, "code/auto"
     )
-    openai = openai_features({"input": "hello"}, "code/auto", None)
+    openai = openai_features({"input": "hello"}, "code/auto")
 
     anthropic_plan = _plan(kernel, router_config, anthropic)
     openai_plan = _plan(kernel, router_config, openai)
@@ -83,7 +87,7 @@ def test_response_state_does_not_cross_state_scope() -> None:
     raw["models"]["openai_deep"]["state_scope"] = "openai-other"
     config = RouterConfig.model_validate(raw)
     request = openai_features(
-        {"input": "continue", "previous_response_id": "resp_private"}, "code/auto", None
+        {"input": "continue", "previous_response_id": "resp_private"}, "code/auto"
     )
 
     plan = _plan(_kernel(config), config, request)
@@ -116,9 +120,9 @@ def test_json_retryable_fallback_and_unknown_field_passthrough(
     """Fallback before commit and preserve successful JSON bytes."""
 
     request = (
-        anthropic_features(request_body, "code/auto", None)
+        anthropic_features(request_body, "code/auto")
         if protocol is Protocol.ANTHROPIC_MESSAGES
-        else openai_features(request_body, "code/auto", None)
+        else openai_features(request_body, "code/auto")
     )
     plan = _plan(_kernel(router_config), router_config, request)
     provider = FakeProviderPort(
@@ -147,11 +151,11 @@ def test_sse_commit_point_preserves_unknown_event_without_fallback(
 
     if protocol is Protocol.ANTHROPIC_MESSAGES:
         body = {"messages": [{"role": "user", "content": "hello"}], "stream": True}
-        request = anthropic_features(body, "code/auto", None)
+        request = anthropic_features(body, "code/auto")
         first = b'event: future_event\ndata: {"type":"future_event","unknown":true}\n\n'
     else:
         body = {"input": "hello", "stream": True}
-        request = openai_features(body, "code/auto", None)
+        request = openai_features(body, "code/auto")
         first = b'event: response.future\ndata: {"type":"response.future","unknown":true}\n\n'
     plan = _plan(_kernel(router_config), router_config, request)
     provider = FakeProviderPort(

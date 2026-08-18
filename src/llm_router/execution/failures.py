@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
-from llm_router.gateway.errors import RouterError, cancelled_error, timeout_error
+from llm_router.errors import RouterError, cancelled_error, timeout_error
 from llm_router.health.models import FailureClass
-
 
 _PROVIDER_TRANSIENT_STATUS = {500, 502, 503, 504, 529}
 

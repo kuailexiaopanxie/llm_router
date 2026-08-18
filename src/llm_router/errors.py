@@ -1,0 +1,105 @@
+"""Stable protocol-neutral router error taxonomy."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from llm_router.domain import AttemptEvent
+
+
+@dataclass
+class RouterError(Exception):
+    """Represent an expected failure whose message is safe for clients."""
+
+    code: str
+    http_status: int
+    safe_message: str
+    fallback_allowed: bool = False
+    retry_after: float | None = None
+    health_snapshot_revision: int = 0
+    health_filtered_count: int = 0
+    health_skipped_count: int = 0
+    health_reason: str | None = None
+    health_skipped_attempts: tuple[AttemptEvent, ...] = ()
+
+    def __str__(self) -> str:
+        """Return the sanitized English error message."""
+
+        return self.safe_message
+
+
+def invalid_request(message: str = "The request is invalid.") -> RouterError:
+    """Create a normalized request error."""
+
+    return RouterError("router_invalid_request", 400, message)
+
+
+def no_capable_model() -> RouterError:
+    """Create the deterministic capability mismatch error."""
+
+    return RouterError("router_no_capable_model", 422, "The requested route has no capable model.")
+
+
+def no_available_target(retry_after: float | None = None) -> RouterError:
+    """Create the temporary target-unavailability error."""
+
+    return RouterError(
+        "router_no_available_target",
+        503,
+        "No capable upstream is temporarily available.",
+        retry_after=retry_after,
+    )
+
+
+def unknown_model() -> RouterError:
+    """Create the unknown profile error."""
+
+    return RouterError("router_unknown_model", 400, "The requested model or profile is not configured.")
+
+
+def unauthorized() -> RouterError:
+    """Create a local authentication error."""
+
+    return RouterError("router_unauthorized", 401, "The local API key is invalid.")
+
+
+def upstream_exhausted() -> RouterError:
+    """Create the exhausted execution-plan error."""
+
+    return RouterError("router_upstream_exhausted", 503, "All planned upstream attempts were exhausted.")
+
+
+def timeout_error() -> RouterError:
+    """Create a total execution deadline error."""
+
+    return RouterError("router_timeout", 504, "The upstream execution deadline was exceeded.")
+
+
+def response_header_timeout() -> RouterError:
+    """Create a retryable response-header timeout."""
+
+    return RouterError(
+        "router_upstream_header_timeout",
+        503,
+        "The upstream response header timed out.",
+        fallback_allowed=True,
+    )
+
+
+def cancelled_error() -> RouterError:
+    """Create a client cancellation error."""
+
+    return RouterError("router_cancelled", 499, "The client cancelled the request.")
+
+
+def upstream_rejected() -> RouterError:
+    """Create a non-retryable upstream rejection error."""
+
+    return RouterError("router_upstream_rejected", 502, "The upstream rejected the request.")
+
+
+def not_ready() -> RouterError:
+    """Create the readiness failure error."""
+
+    return RouterError("router_not_ready", 503, "The router is not ready.")
+
