@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from llm_router.domain import AttemptEvent
+
 
 @dataclass
 class RouterError(Exception):
@@ -14,6 +16,11 @@ class RouterError(Exception):
     safe_message: str
     fallback_allowed: bool = False
     retry_after: float | None = None
+    health_snapshot_revision: int = 0
+    health_filtered_count: int = 0
+    health_skipped_count: int = 0
+    health_reason: str | None = None
+    health_skipped_attempts: tuple[AttemptEvent, ...] = ()
 
     def __str__(self) -> str:
         """Return the sanitized English error message."""
@@ -34,6 +41,17 @@ def no_capable_model() -> RouterError:
         "router_no_capable_model",
         422,
         "The requested route has no capable model.",
+    )
+
+
+def no_available_target(retry_after: float | None = None) -> RouterError:
+    """Create the deterministic temporary target-unavailability error."""
+
+    return RouterError(
+        "router_no_available_target",
+        503,
+        "No capable upstream is temporarily available.",
+        retry_after=retry_after,
     )
 
 

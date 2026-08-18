@@ -8,6 +8,7 @@ from typing import Protocol
 
 from llm_router.gateway.errors import RouterError
 from llm_router.gateway.renderers import AnthropicErrorRenderer, ErrorRenderer, OpenAIErrorRenderer
+from llm_router.health.models import FailureClass
 
 
 class StreamSemantics(Protocol):
@@ -21,6 +22,9 @@ class StreamSemantics(Protocol):
 
     def extract_usage(self, event: bytes) -> tuple[int | None, int | None]:
         """Extract bounded usage counters from one complete event."""
+
+    def terminal_outcome(self, event: bytes) -> FailureClass | None:
+        """Return a bounded outcome when an event terminates the stream."""
 
 
 def _event_payload(event: bytes) -> Mapping[str, object]:
@@ -93,6 +97,20 @@ class AnthropicStreamSemantics(_JSONStreamSemantics):
             output_tokens if isinstance(output_tokens, int) else None,
         )
 
+    def terminal_outcome(self, event: bytes) -> FailureClass | None:
+        """Recognize Anthropic success and upstream error terminal events."""
+
+        try:
+            payload = _event_payload(event)
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        event_type = payload.get("type")
+        if event_type == "message_stop":
+            return FailureClass.SUCCESS
+        if event_type == "error":
+            return FailureClass.POST_COMMIT_STREAM_FAILURE
+        return None
+
 
 class OpenAIStreamSemantics(_JSONStreamSemantics):
     """Handle OpenAI Responses stream validation and usage."""
@@ -121,3 +139,17 @@ class OpenAIStreamSemantics(_JSONStreamSemantics):
             input_tokens if isinstance(input_tokens, int) else None,
             output_tokens if isinstance(output_tokens, int) else None,
         )
+
+    def terminal_outcome(self, event: bytes) -> FailureClass | None:
+        """Recognize OpenAI Responses success and failure terminal events."""
+
+        try:
+            payload = _event_payload(event)
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        event_type = payload.get("type")
+        if event_type == "response.completed":
+            return FailureClass.SUCCESS
+        if event_type in {"error", "response.failed", "response.incomplete"}:
+            return FailureClass.POST_COMMIT_STREAM_FAILURE
+        return None

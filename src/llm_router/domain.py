@@ -128,6 +128,9 @@ class ExecutionPlan:
     auxiliary_reasons: tuple[str, ...]
     profile: str
     policy_version: str
+    health_snapshot_revision: int = 0
+    health_filtered_count: int = 0
+    health_reason: str | None = None
 
     @property
     def targets(self) -> tuple[ModelTarget, ...]:
@@ -195,6 +198,7 @@ class ProxyResponse:
     attempt_count: int
     completion: Any
     attempts: tuple[AttemptEvent, ...] = field(default_factory=tuple)
+    health_skipped_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,3 +241,8 @@ class RouteEvent:
     provider_account_scope: str | None = None
     response_state_requested: bool = False
     translation_mode: str = "none"
+    health_enabled: bool = False
+    health_snapshot_revision: int = 0
+    health_filtered_count: int = 0
+    health_skipped_count: int = 0
+    health_reason: str | None = None

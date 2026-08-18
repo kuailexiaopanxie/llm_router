@@ -9,7 +9,8 @@ import httpx
 
 from llm_router.config import ProviderConfig
 from llm_router.domain import ProviderExchange, ProviderRequest
-from llm_router.gateway.errors import RouterError
+from llm_router.health.models import FailureClass
+from llm_router.providers.port import ProviderFailure
 
 
 _FORWARDED_HEADERS = {"content-type", "accept"}
@@ -64,11 +65,9 @@ class OpenAIProvider:
             raise
         except (httpx.HTTPError, OSError) as exc:
             self._semaphore.release()
-            raise RouterError(
+            raise ProviderFailure(
                 "router_upstream_connect_failed",
-                503,
-                "The upstream connection failed.",
-                fallback_allowed=True,
+                FailureClass.PROVIDER_TRANSIENT,
             ) from exc
 
         closed = False

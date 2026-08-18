@@ -17,6 +17,7 @@ from llm_router.gateway.common import (
     provider_extension_headers,
     read_json_object,
     record_completion,
+    record_route_failure,
     route_headers,
 )
 from llm_router.gateway.errors import RouterError, invalid_request
@@ -58,6 +59,10 @@ class AnthropicGateway:
         config = runtime.config
         rid = request_id(request.headers)
         stage = "authenticate"
+        envelope = None
+        routing_request = None
+        availability = None
+        plan = None
         try:
             authenticate(request.headers, runtime.client_key)
             stage = "read_request"
@@ -79,7 +84,8 @@ class AnthropicGateway:
             )
             stage = "route"
             routing_request = extract_routing_request(body, model, session_id, count_only=count_only)
-            plan = runtime.kernel.plan(routing_request)
+            availability = runtime.health.snapshot(datetime.now(timezone.utc))
+            plan = runtime.kernel.plan(routing_request, availability)
             stage = "execute"
             response = await runtime.engine.execute(envelope, plan)
             stage = "build_response"
@@ -102,6 +108,20 @@ class AnthropicGateway:
                 media_type=response.media_type,
             )
         except RouterError as error:
+            if (
+                error.code == "router_no_available_target"
+                and envelope is not None
+                and routing_request is not None
+                and availability is not None
+            ):
+                record_route_failure(
+                    runtime,
+                    envelope,
+                    routing_request,
+                    availability,
+                    error,
+                    plan,
+                )
             return self._errors.json_error(error, rid)
         except Exception:
             logging.getLogger("llm_router.gateway").exception(

@@ -53,6 +53,25 @@ class StorageConfig(StrictModel):
     queue_capacity: int = Field(default=2048, ge=1, le=100_000)
 
 
+class HealthConfig(StrictModel):
+    """Bounded in-memory Provider and Model Target health policy."""
+
+    enabled: bool = True
+    failure_threshold: int = Field(default=2, ge=1, le=10)
+    failure_window_seconds: int = Field(default=120, ge=10, le=86_400)
+    cooldown_seconds: float = Field(default=30, ge=1, le=3_600)
+    max_cooldown_seconds: float = Field(default=300, ge=1, le=86_400)
+    backoff_multiplier: float = Field(default=2.0, ge=1.0, le=8.0)
+
+    @model_validator(mode="after")
+    def validate_cooldown(self) -> HealthConfig:
+        """Keep the maximum cooldown above the initial cooldown."""
+
+        if self.max_cooldown_seconds < self.cooldown_seconds:
+            raise ValueError("max_cooldown_seconds must be at least cooldown_seconds")
+        return self
+
+
 class ProviderConfig(StrictModel):
     """Protocol provider connection settings."""
 
@@ -150,7 +169,7 @@ class RoutingConfig(StrictModel):
     """Versioned deterministic policy thresholds."""
 
     default_profile: str = "code/auto"
-    policy_version: str = "v1"
+    policy_version: str = "v2"
     session_ttl_seconds: int = Field(default=7200, ge=1)
     session_capacity: int = Field(default=10_000, ge=1)
     failure_escalation_requests: int = Field(default=2, ge=1)
@@ -189,6 +208,7 @@ class RouterConfig(StrictModel):
     version: Literal[1]
     server: ServerConfig
     storage: StorageConfig
+    health: HealthConfig = Field(default_factory=HealthConfig)
     providers: dict[str, ProviderConfig]
     models: dict[str, ModelConfig]
     profiles: dict[str, ProfileConfig]

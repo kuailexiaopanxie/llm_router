@@ -9,6 +9,14 @@ server:
 storage:
   sqlite_path: ~/.llm-router/router.db
 
+health:
+  enabled: true
+  failure_threshold: 2
+  failure_window_seconds: 120
+  cooldown_seconds: 30
+  max_cooldown_seconds: 300
+  backoff_multiplier: 2.0
+
 providers:
   anthropic:
     type: anthropic
@@ -97,7 +105,7 @@ profiles:
 
 routing:
   default_profile: code/auto
-  policy_version: v1
+  policy_version: v2
   session_ttl_seconds: 7200
   failure_escalation_requests: 2
   fast_max_input_tokens: 8000

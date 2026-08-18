@@ -50,7 +50,12 @@ class SQLiteEventStore:
                 target_protocol TEXT,
                 provider_account_scope TEXT,
                 response_state_requested INTEGER NOT NULL DEFAULT 0,
-                translation_mode TEXT NOT NULL DEFAULT 'none'
+                translation_mode TEXT NOT NULL DEFAULT 'none',
+                health_enabled INTEGER NOT NULL DEFAULT 0,
+                health_snapshot_revision INTEGER NOT NULL DEFAULT 0,
+                health_filtered_count INTEGER NOT NULL DEFAULT 0,
+                health_skipped_count INTEGER NOT NULL DEFAULT 0,
+                health_reason TEXT
             );
             CREATE TABLE IF NOT EXISTS route_attempts (
                 request_id TEXT NOT NULL,
@@ -74,6 +79,11 @@ class SQLiteEventStore:
                 "provider_account_scope": "TEXT",
                 "response_state_requested": "INTEGER NOT NULL DEFAULT 0",
                 "translation_mode": "TEXT NOT NULL DEFAULT 'none'",
+                "health_enabled": "INTEGER NOT NULL DEFAULT 0",
+                "health_snapshot_revision": "INTEGER NOT NULL DEFAULT 0",
+                "health_filtered_count": "INTEGER NOT NULL DEFAULT 0",
+                "health_skipped_count": "INTEGER NOT NULL DEFAULT 0",
+                "health_reason": "TEXT",
             },
         )
         await self._connection.commit()
@@ -101,8 +111,10 @@ class SQLiteEventStore:
              primary_model, final_model, route_reason, policy_version, status,
              attempt_count, time_to_first_event_ms, total_latency_ms, input_tokens,
              output_tokens, estimated_cost, error_code, inbound_protocol, target_protocol,
-             provider_account_scope, response_state_requested, translation_mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             provider_account_scope, response_state_requested, translation_mode,
+             health_enabled, health_snapshot_revision, health_filtered_count,
+             health_skipped_count, health_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.request_id,
@@ -128,6 +140,11 @@ class SQLiteEventStore:
                 event.provider_account_scope,
                 int(event.response_state_requested),
                 event.translation_mode,
+                int(event.health_enabled),
+                event.health_snapshot_revision,
+                event.health_filtered_count,
+                event.health_skipped_count,
+                event.health_reason,
             ),
         )
         await self._connection.executemany(

@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Protocol
 
 from fastapi.responses import JSONResponse
 
 from llm_router.gateway.errors import RouterError
+
+
+def _error_headers(error: RouterError, request_id: str) -> dict[str, str]:
+    """Build safe router error headers with bounded Retry-After."""
+
+    headers = {"x-llm-router-request-id": request_id}
+    if error.retry_after is not None:
+        headers["retry-after"] = str(max(0, math.ceil(error.retry_after)))
+    return headers
 
 
 class ErrorRenderer(Protocol):
@@ -52,7 +62,7 @@ class AnthropicErrorRenderer:
 
         return JSONResponse(
             status_code=error.http_status,
-            headers={"x-llm-router-request-id": request_id},
+            headers=_error_headers(error, request_id),
             content={
                 "type": "error",
                 "error": {"type": _anthropic_error_type(error), "message": error.safe_message},
@@ -78,7 +88,7 @@ class OpenAIErrorRenderer:
 
         return JSONResponse(
             status_code=error.http_status,
-            headers={"x-llm-router-request-id": request_id},
+            headers=_error_headers(error, request_id),
             content={
                 "error": {
                     "message": error.safe_message,

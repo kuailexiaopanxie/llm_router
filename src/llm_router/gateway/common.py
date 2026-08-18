@@ -6,13 +6,14 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Request
 
 from llm_router.config import RouterConfig
 from llm_router.domain import ExecutionStats, OutcomeSignal, Protocol, ProtocolEnvelope, RouteEvent
-from llm_router.gateway.errors import invalid_request
+from llm_router.gateway.errors import RouterError, invalid_request
 from llm_router.routing.feature_utils import summarize_features
 
 
@@ -81,9 +82,7 @@ async def record_completion(
             stats = replace(stats, input_tokens=input_tokens, output_tokens=output_tokens)
         status = stats.status
         outcome = routing_request.outcome_signal
-        if outcome is OutcomeSignal.UNKNOWN:
-            outcome = OutcomeSignal.SUCCESS if status == "success" else OutcomeSignal.FAILURE
-        if not envelope.endpoint.endswith("count_tokens"):
+        if outcome is not OutcomeSignal.UNKNOWN and not envelope.endpoint.endswith("count_tokens"):
             runtime.sessions.record(routing_request.session_id, response.final_target.tier, outcome)
         runtime.telemetry.record(
             RouteEvent(
@@ -109,10 +108,69 @@ async def record_completion(
                 target_protocol=response.final_target.protocol.value,
                 provider_account_scope=response.final_target.state_scope,
                 response_state_requested=routing_request.response_state_requested,
+                health_enabled=runtime.config.health.enabled,
+                health_snapshot_revision=plan.health_snapshot_revision,
+                health_filtered_count=plan.health_filtered_count,
+                health_skipped_count=response.health_skipped_count,
+                health_reason=plan.health_reason,
             )
         )
     except Exception:
         logging.getLogger("llm_router.gateway").exception(
             "completion telemetry failed",
             extra={"event": "completion_telemetry_failed", "request_id": envelope.request_id},
+        )
+
+
+def record_route_failure(
+    runtime: Any,
+    envelope: ProtocolEnvelope,
+    routing_request: Any,
+    availability: Any,
+    error: RouterError,
+    plan: Any | None = None,
+) -> None:
+    """Record a bounded no-available-target failure without session updates."""
+
+    try:
+        snapshot_revision = (
+            error.health_snapshot_revision
+            or (plan.health_snapshot_revision if plan is not None else availability.revision)
+        )
+        filtered_count = (
+            error.health_filtered_count
+            or (plan.health_filtered_count if plan is not None else 0)
+        )
+        health_reason = error.health_reason or "health_no_available_target"
+        runtime.telemetry.record(
+            RouteEvent(
+                request_id=envelope.request_id,
+                received_at=envelope.received_at,
+                protocol=envelope.protocol.value,
+                profile=routing_request.requested_profile,
+                stream=envelope.stream,
+                feature_summary=summarize_features(routing_request),
+                primary_model="none",
+                final_model="none",
+                route_reason=health_reason,
+                policy_version=runtime.config.effective_policy_version,
+                status="error",
+                attempt_count=0,
+                total_latency_ms=(datetime.now(timezone.utc) - envelope.received_at).total_seconds()
+                * 1000,
+                error_code=error.code,
+                attempts=error.health_skipped_attempts,
+                inbound_protocol=envelope.protocol.value,
+                response_state_requested=routing_request.response_state_requested,
+                health_enabled=runtime.config.health.enabled,
+                health_snapshot_revision=snapshot_revision,
+                health_filtered_count=filtered_count,
+                health_skipped_count=error.health_skipped_count,
+                health_reason=health_reason,
+            )
+        )
+    except Exception:
+        logging.getLogger("llm_router.gateway").exception(
+            "route failure telemetry failed",
+            extra={"event": "route_failure_telemetry_failed", "request_id": envelope.request_id},
         )
