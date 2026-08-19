@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 from conftest import envelope
 from fastapi import Request
@@ -19,6 +20,13 @@ from llm_router.gateway.openai import OpenAIResponsesGateway
 from llm_router.health.coordinator import InMemoryHealthCoordinator
 from llm_router.health.models import AttemptOutcome, FailureClass
 from llm_router.health.port import HealthPort
+from llm_router.observability.lifecycle import (
+    ActiveObservationRegistry,
+    RequestObservation,
+)
+from llm_router.observability.metrics import RouterMetrics
+from llm_router.observability.models import EndpointKind
+from llm_router.observability.tracing import trace_context
 from llm_router.routing.kernel import RoutingKernel
 from llm_router.routing.policy import compile_routing_policy
 
@@ -69,13 +77,17 @@ def _runtime(
         routing_snapshot=lambda _: None,
         record=lambda *items: session_calls.append(items),
     )
+    metrics = RouterMetrics()
+    observations = SimpleNamespace(record=events.append)
     return SimpleNamespace(
         config=config,
         client_key="local-token",
         health=health,
         kernel=kernel,
         engine=SimpleNamespace(execute=execute),
-        telemetry=SimpleNamespace(record=events.append),
+        observations=observations,
+        observation_registry=ActiveObservationRegistry(observations, metrics),
+        metrics=metrics,
         sessions=sessions,
         coordinator=RoutingCoordinator(
             CurrentPolicySelector(kernel),
@@ -124,10 +136,9 @@ def test_anthropic_no_available_target_has_retry_header_and_telemetry(
     assert payload["error"]["type"] == "overloaded_error"
     assert len(events) == 1
     event = events[0]
-    assert event.primary_model == "none"  # type: ignore[union-attr]
-    assert event.attempt_count == 0  # type: ignore[union-attr]
-    assert event.attempts == ()  # type: ignore[union-attr]
-    assert event.health_filtered_count > 0  # type: ignore[union-attr]
+    assert event.routing.primary_model is None  # type: ignore[union-attr]
+    assert event.execution is None  # type: ignore[union-attr]
+    assert event.routing.health_filtered_count > 0  # type: ignore[union-attr]
     assert sessions == []
 
 
@@ -155,7 +166,7 @@ def test_openai_no_available_target_uses_openai_error_shape(
     assert payload["error"]["code"] == "router_no_available_target"
     assert payload["error"]["type"] == "api_error"
     assert len(events) == 1
-    assert events[0].protocol == Protocol.OPENAI_RESPONSES.value  # type: ignore[union-attr]
+    assert events[0].protocol is Protocol.OPENAI_RESPONSES  # type: ignore[union-attr]
 
 
 def test_unknown_provider_exchange_does_not_update_session(router_config: RouterConfig) -> None:
@@ -188,13 +199,21 @@ def test_unknown_provider_exchange_does_not_update_session(router_config: Router
             attempt_count=1,
             completion=completion,
         )
+        inbound = envelope(Protocol.ANTHROPIC_MESSAGES, body)
+        lifecycle = RequestObservation(
+            runtime.observations,
+            uuid4(),
+            trace_context(None),
+            inbound.received_at,
+            EndpointKind.MESSAGES,
+        )
+        lifecycle.request_facts(Protocol.ANTHROPIC_MESSAGES, "code/fast", False, None)
         await record_completion(
             runtime,
-            envelope=envelope(Protocol.ANTHROPIC_MESSAGES, body),
+            envelope=inbound,
             routing_request=replace(request, outcome_signal=outcome),
-            plan=plan,
             response=response,
-            usage_extractor=lambda _: (None, None),
+            lifecycle=lifecycle,
             session_key="session-1",
         )
 

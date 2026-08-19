@@ -6,7 +6,10 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from llm_router.observability.models import UsageBreakdown
 
 
 class Capability(StrEnum):
@@ -57,6 +60,7 @@ class ProtocolEnvelope:
     stream: bool
     received_at: datetime
     endpoint: str = "/v1/messages"
+    traceparent: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,11 +175,12 @@ class AttemptEvent:
     status: str
     http_status: int | None = None
     error_code: str | None = None
+    upstream_invoked: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionStats:
-    """Final execution measurements shared with telemetry."""
+    """Final execution measurements shared with observability."""
 
     status: str
     total_latency_ms: float
@@ -183,6 +188,19 @@ class ExecutionStats:
     input_tokens: int | None = None
     output_tokens: int | None = None
     error_code: str | None = None
+    usage: UsageBreakdown | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionFailureSnapshot:
+    """Preserve bounded failed execution facts on a RouterError."""
+
+    started_at: datetime
+    duration_ms: float
+    attempts: tuple[AttemptEvent, ...]
+    upstream_attempt_count: int
+    health_skipped_count: int
+    committed: bool = False
 
 
 @dataclass(slots=True)
@@ -210,39 +228,3 @@ class FeatureSummary:
     tool_rounds_bucket: str
     outcome_signal: str
     task_signal_count: int
-
-
-@dataclass(frozen=True, slots=True)
-class RouteEvent:
-    """Sanitized request-level telemetry record."""
-
-    request_id: str
-    received_at: datetime
-    protocol: str
-    profile: str
-    stream: bool
-    feature_summary: FeatureSummary
-    primary_model: str
-    final_model: str
-    route_reason: str
-    policy_version: str
-    status: str
-    attempt_count: int
-    total_latency_ms: float
-    time_to_first_event_ms: float | None = None
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-    estimated_cost: float | None = None
-    error_code: str | None = None
-    attempts: tuple[AttemptEvent, ...] = field(default_factory=tuple)
-    inbound_protocol: str | None = None
-    target_protocol: str | None = None
-    provider_account_scope: str | None = None
-    response_state_requested: bool = False
-    translation_mode: str = "none"
-    health_enabled: bool = False
-    health_snapshot_revision: int = 0
-    health_filtered_count: int = 0
-    health_skipped_count: int = 0
-    health_reason: str | None = None
-    task_id: str | None = None

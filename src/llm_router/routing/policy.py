@@ -55,7 +55,7 @@ class RoutingPolicy:
 
     @property
     def effective_policy_version(self) -> str:
-        """Return legacy policy metadata used by online telemetry."""
+        """Return legacy policy metadata used by online observations."""
 
         return f"{self.policy_version}-{self.routing_policy_hash[:12]}"
 

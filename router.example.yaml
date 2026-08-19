@@ -11,9 +11,45 @@ server:
   # 单个模型请求体的最大字节数，16 MiB。
   max_request_bytes: 16777216
 
-# 本地持久化：路由遥测、Outcome、Replay 与 Shadow 数据共用此 SQLite 文件。
+# 本地持久化：Observation、Outcome、Replay、Shadow 与 Canary 数据共用此 SQLite 文件。
 storage:
   sqlite_path: ~/.llm-router/router.db
+  # v0.6 兼容配置；必须与 observability.queue_capacity 一致。
+  queue_capacity: 2048
+
+# v0.7：统一记录每个模型请求的终态、usage、已知成本和本地 Trace。
+observability:
+  # 是否异步持久化 Observation bundle；关闭不影响实时 Metrics。
+  capture_enabled: true
+  # SQLite 写队列容量；队列满时丢弃最新 observation，不阻塞模型请求。
+  queue_capacity: 2048
+  tracing:
+    # 是否按 sample_rate 构造固定、白名单化的本地 span 树。
+    enabled: true
+    # 确定性采样比例，范围 0..1，最多四位小数。
+    sample_rate: "1.0"
+    # 是否接受合法 W3C traceparent 作为远端父上下文；不接受 baggage/tracestate。
+    accept_traceparent: true
+    # 是否把采样 span 与 route observation 原子写入 SQLite。
+    local_store: true
+    otlp:
+      # 默认关闭；启用后使用独立有界队列导出 Trace，不影响 readiness。
+      enabled: false
+      # OTLP/HTTP traces endpoint；远程明文 HTTP 还需 allow_insecure: true。
+      endpoint: http://127.0.0.1:4318/v1/traces
+      # 可选 exporter header 环境变量名，值不会写入日志、Trace 或 SQLite。
+      headers_env: LLM_ROUTER_OTLP_HEADERS
+      timeout_seconds: 3
+      queue_capacity: 2048
+      batch_size: 256
+      allow_insecure: false
+  metrics:
+    # 是否暴露 /metrics；关闭时返回 404。
+    enabled: true
+    # true 时 /metrics 复用本地 client API key；远程监听必须启用。
+    require_auth: false
+  # null 表示永久保留；整数表示按 UTC 分批删除过期 observation，单位天。
+  retention_days: null
 
 # v0.4：接收调用方提交的真实任务结果，不会实时改变路由或健康状态。
 outcomes:
@@ -95,6 +131,8 @@ providers:
     auth_scheme: x_api_key
     # 此 Provider 的最大并发上游请求数。
     max_concurrency: 16
+    # 默认不把 Router Trace Context 发送给上游；开启时只注入规范化 traceparent。
+    propagate_trace_context: false
   openai:
     type: openai
     base_url: https://api.openai.com
@@ -102,6 +140,7 @@ providers:
     # OpenAI Responses 使用 Authorization: Bearer 认证。
     auth_scheme: bearer
     max_concurrency: 16
+    propagate_trace_context: false
 
 # Router 内部模型别名到上游模型的映射。
 # 必须将 configured-... 替换为上游实际支持的模型名称。
@@ -116,6 +155,15 @@ models:
     capabilities: [streaming, tools, prompt_cache]
     # 上游模型可接受的最大输入 token 数。
     max_input_tokens: 200000
+    # 可选的版本化观测价格。所有费率必须使用字符串，缺少的类别按不可定价处理。
+    # 这里只是格式示例，部署前必须替换为实际合同价格；它不参与路由 policy hash。
+    pricing:
+      version: "replace-with-contract-version"
+      currency: USD
+      input_per_million: "3.00"
+      output_per_million: "15.00"
+      cache_read_input_per_million: "0.30"
+      cache_write_input_per_million: "3.75"
   anthropic_balanced:
     provider: anthropic
     upstream_model: configured-balanced-model

@@ -22,7 +22,7 @@ from llm_router.evaluation.models import (
 )
 from llm_router.evaluation.port import ShadowStorePort
 from llm_router.evaluation.replay import ReplayEngine
-from llm_router.telemetry.metrics import RouterMetrics
+from llm_router.observability.metrics import RouterMetrics
 
 
 class ShadowEvaluatorPort(Protocol):

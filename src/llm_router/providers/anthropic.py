@@ -29,7 +29,7 @@ class AnthropicProvider:
         self._client = httpx.AsyncClient(base_url=config.base_url.rstrip("/"))
         self._semaphore = asyncio.Semaphore(config.max_concurrency)
 
-    def _headers(self, incoming: Mapping[str, str]) -> dict[str, str]:
+    def _headers(self, incoming: Mapping[str, str], traceparent: str | None = None) -> dict[str, str]:
         """Filter client headers and inject upstream authentication."""
 
         allowed = _FORWARDED_HEADERS | {item.lower() for item in self._config.extension_headers}
@@ -41,6 +41,8 @@ class AnthropicProvider:
         else:
             headers["x-api-key"] = self._api_key
         headers.setdefault("content-type", "application/json")
+        if self._config.propagate_trace_context and traceparent is not None:
+            headers["traceparent"] = traceparent
         return headers
 
     async def invoke(self, request: ProviderRequest) -> ProviderExchange:
@@ -60,7 +62,7 @@ class AnthropicProvider:
             outbound = self._client.build_request(
                 "POST",
                 "/v1/messages/count_tokens" if request.envelope.endpoint.endswith("count_tokens") else "/v1/messages",
-                headers=self._headers(request.envelope.safe_headers),
+                headers=self._headers(request.envelope.safe_headers, request.envelope.traceparent),
                 json=body,
                 timeout=timeout,
             )

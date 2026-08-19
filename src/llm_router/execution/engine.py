@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import time
 from collections.abc import Mapping
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 
 from llm_router.domain import (
     AttemptEvent,
+    ExecutionFailureSnapshot,
     ExecutionPlan,
     ExecutionStats,
     Protocol,
@@ -42,6 +44,11 @@ from llm_router.health.models import (
     HealthLease,
 )
 from llm_router.health.port import HealthPort
+from llm_router.observability.models import UsageBreakdown
+from llm_router.observability.usage import (
+    normalize_anthropic_usage,
+    normalize_openai_usage,
+)
 from llm_router.providers.port import ProviderFailure, ProviderPort
 
 
@@ -115,10 +122,47 @@ class ExecutionEngine:
         remaining = (snapshot.earliest_recovery_at - snapshot.observed_at).total_seconds()
         return float(max(0, math.ceil(remaining)))
 
+    @staticmethod
+    def _usage(payload: bytes, protocol: Protocol, count_only: bool) -> UsageBreakdown:
+        """Normalize bounded non-stream JSON usage by inbound protocol."""
+
+        if count_only:
+            return UsageBreakdown.not_applicable()
+        try:
+            value = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return UsageBreakdown.missing()
+        if not isinstance(value, Mapping):
+            return UsageBreakdown.missing()
+        if protocol is Protocol.OPENAI_RESPONSES:
+            return normalize_openai_usage(value)
+        return normalize_anthropic_usage(value)
+
+    @staticmethod
+    def _attach_failure(
+        error: RouterError,
+        started_at: datetime,
+        started: float,
+        attempts: list[AttemptEvent],
+        upstream_attempt_count: int,
+        health_skipped_count: int,
+    ) -> RouterError:
+        """Attach bounded failed execution facts without changing error rendering."""
+
+        error.execution = ExecutionFailureSnapshot(
+            started_at,
+            (time.monotonic() - started) * 1000,
+            tuple(attempts),
+            upstream_attempt_count,
+            health_skipped_count,
+        )
+        return error
+
     async def execute(self, envelope: ProtocolEnvelope, plan: ExecutionPlan) -> ProxyResponse:
         """Execute a routing plan while preserving pre-commit fallback behavior."""
 
         started = time.monotonic()
+        started_at = datetime.now(timezone.utc)
         deadline_budget = (
             plan.timeouts.stream_max_seconds if envelope.stream else plan.timeouts.non_stream_deadline_seconds
         )
@@ -153,6 +197,7 @@ class ExecutionEngine:
                         started_at=attempt_wall,
                         duration_ms=(time.monotonic() - attempt_started) * 1000,
                         status="health_skipped",
+                        upstream_invoked=False,
                     )
                 )
                 continue
@@ -287,7 +332,11 @@ class ExecutionEngine:
                 record_lease(AttemptOutcome(FailureClass.SUCCESS, datetime.now(timezone.utc)))
                 completion = asyncio.get_running_loop().create_future()
                 completion.set_result(
-                    ExecutionStats(status="success", total_latency_ms=(time.monotonic() - started) * 1000)
+                    ExecutionStats(
+                        status="success",
+                        total_latency_ms=(time.monotonic() - started) * 1000,
+                        usage=self._usage(payload, envelope.protocol, envelope.endpoint.endswith("count_tokens")),
+                    )
                 )
                 event_sequence += 1
                 attempts.append(
@@ -322,7 +371,28 @@ class ExecutionEngine:
                 record_lease(
                     AttemptOutcome(FailureClass.CLIENT_CANCELLED, datetime.now(timezone.utc))
                 )
-                raise cancelled_error()
+                event_sequence += 1
+                attempts.append(
+                    AttemptEvent(
+                        request_id=envelope.request_id,
+                        sequence=event_sequence,
+                        provider=target.provider,
+                        model=target.alias,
+                        started_at=attempt_wall,
+                        duration_ms=(time.monotonic() - attempt_started) * 1000,
+                        status="cancelled",
+                        http_status=upstream_http_status,
+                        error_code="router_cancelled",
+                    )
+                )
+                raise self._attach_failure(
+                    cancelled_error(),
+                    started_at,
+                    started,
+                    attempts,
+                    upstream_attempt_count,
+                    health_skipped_count,
+                )
             except ProviderFailure as exc:
                 failure_decision = FailureDecision(
                     exc.failure_class,
@@ -383,9 +453,37 @@ class ExecutionEngine:
             error.health_skipped_count = health_skipped_count
             error.health_reason = "health_lease_unavailable"
             error.health_skipped_attempts = tuple(attempts)
-            raise error
+            raise self._attach_failure(
+                error,
+                started_at,
+                started,
+                attempts,
+                upstream_attempt_count,
+                health_skipped_count,
+            )
         if last_error is not None and last_error.code == "router_timeout":
-            raise last_error
+            raise self._attach_failure(
+                last_error,
+                started_at,
+                started,
+                attempts,
+                upstream_attempt_count,
+                health_skipped_count,
+            )
         if last_error is not None and not last_error.fallback_allowed:
-            raise last_error
-        raise upstream_exhausted()
+            raise self._attach_failure(
+                last_error,
+                started_at,
+                started,
+                attempts,
+                upstream_attempt_count,
+                health_skipped_count,
+            )
+        raise self._attach_failure(
+            upstream_exhausted(),
+            started_at,
+            started,
+            attempts,
+            upstream_attempt_count,
+            health_skipped_count,
+        )

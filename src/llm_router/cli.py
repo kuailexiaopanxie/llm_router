@@ -24,6 +24,7 @@ from llm_router.evaluation.models import (
 from llm_router.evaluation.replay import ReplayEngine, ReplayFatalError
 from llm_router.evaluation.shadow_sqlite import SQLiteShadowReader
 from llm_router.evaluation.sqlite_store import SQLiteReplayStore
+from llm_router.observability.cli import run_cost, run_routes, run_trace
 from llm_router.routing.policy import compile_routing_policy
 
 
@@ -324,6 +325,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_shadow_report(arguments[1:])
     if arguments and arguments[0] == "canary-report":
         return run_canary_report(arguments[1:])
+    if arguments and arguments[0] == "routes":
+        return run_routes(arguments[1:])
+    if arguments and arguments[0] == "trace":
+        return run_trace(arguments[1:])
+    if arguments and arguments[0] == "cost":
+        return run_cost(arguments[1:])
     from llm_router.app import main as server_main
 
     server_main()

@@ -11,10 +11,14 @@ from fastapi.responses import JSONResponse
 from llm_router.errors import RouterError
 
 
-def _error_headers(error: RouterError, request_id: str) -> dict[str, str]:
+def _error_headers(
+    error: RouterError, request_id: str, trace_id: str | None = None
+) -> dict[str, str]:
     """Build safe router error headers with bounded Retry-After."""
 
     headers = {"x-llm-router-request-id": request_id}
+    if trace_id is not None:
+        headers["x-llm-router-trace-id"] = trace_id
     if error.retry_after is not None:
         headers["retry-after"] = str(max(0, math.ceil(error.retry_after)))
     return headers
@@ -23,7 +27,9 @@ def _error_headers(error: RouterError, request_id: str) -> dict[str, str]:
 class ErrorRenderer(Protocol):
     """Render one protocol-compatible router error."""
 
-    def json_error(self, error: RouterError, request_id: str) -> JSONResponse:
+    def json_error(
+        self, error: RouterError, request_id: str, trace_id: str | None = None
+    ) -> JSONResponse:
         """Render a non-stream error response."""
 
     def stream_error(self, error: RouterError) -> bytes:
@@ -57,12 +63,14 @@ def _openai_error_type(error: RouterError) -> str:
 class AnthropicErrorRenderer:
     """Render Anthropic Messages compatible error bodies and events."""
 
-    def json_error(self, error: RouterError, request_id: str) -> JSONResponse:
+    def json_error(
+        self, error: RouterError, request_id: str, trace_id: str | None = None
+    ) -> JSONResponse:
         """Render a normalized Anthropic JSON error."""
 
         return JSONResponse(
             status_code=error.http_status,
-            headers=_error_headers(error, request_id),
+            headers=_error_headers(error, request_id, trace_id),
             content={
                 "type": "error",
                 "error": {"type": _anthropic_error_type(error), "message": error.safe_message},
@@ -83,12 +91,14 @@ class AnthropicErrorRenderer:
 class OpenAIErrorRenderer:
     """Render OpenAI Responses compatible error bodies and events."""
 
-    def json_error(self, error: RouterError, request_id: str) -> JSONResponse:
+    def json_error(
+        self, error: RouterError, request_id: str, trace_id: str | None = None
+    ) -> JSONResponse:
         """Render a normalized OpenAI JSON error."""
 
         return JSONResponse(
             status_code=error.http_status,
-            headers=_error_headers(error, request_id),
+            headers=_error_headers(error, request_id, trace_id),
             content={
                 "error": {
                     "message": error.safe_message,

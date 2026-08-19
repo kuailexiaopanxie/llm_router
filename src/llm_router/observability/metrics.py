@@ -12,24 +12,33 @@ from prometheus_client import (
     generate_latest,
 )
 
-from llm_router.domain import ModelTarget, RouteEvent
+from llm_router.domain import ModelTarget
 from llm_router.evaluation.canary_models import CanaryAssignment, PolicyRole
 from llm_router.health.models import AvailabilitySnapshot, HealthState, HealthTransition
+from llm_router.observability.models import ObservationBundle
 
 
 class RouterMetrics:
     """Keep metrics labels limited to configured route dimensions."""
 
     def __init__(self) -> None:
+        """Create one private Prometheus registry and bounded metric catalog."""
+
         self.registry = CollectorRegistry()
         self.requests = Counter(
-            "llm_router_requests_total", "Requests handled", ["profile", "status"], registry=self.registry
+            "llm_router_requests_total",
+            "Requests handled",
+            ["protocol", "profile", "status", "stage"],
+            registry=self.registry,
         )
         self.routes = Counter(
             "llm_router_routes_total", "Requests by final model", ["profile", "tier", "model"], registry=self.registry
         )
         self.attempts = Counter(
-            "llm_router_attempts_total", "Provider attempts", ["provider", "model", "status"], registry=self.registry
+            "llm_router_attempts_total",
+            "Provider attempts",
+            ["protocol", "provider", "model", "status"],
+            registry=self.registry,
         )
         self.routing_latency = Histogram(
             "llm_router_total_latency_ms", "End-to-end latency", registry=self.registry
@@ -37,7 +46,15 @@ class RouterMetrics:
         self.first_event_latency = Histogram(
             "llm_router_first_event_latency_ms", "Time to first stream event", registry=self.registry
         )
-        self.active_streams = Gauge("llm_router_active_streams", "Active SSE streams", registry=self.registry)
+        self.first_event_duration = Histogram(
+            "llm_router_first_event_duration_seconds",
+            "Time to first stream event",
+            ["protocol", "model"],
+            registry=self.registry,
+        )
+        self.active_streams = Gauge(
+            "llm_router_active_streams", "Active SSE streams", ["protocol"], registry=self.registry
+        )
         self.telemetry_dropped = Counter(
             "llm_router_telemetry_dropped_total", "Dropped telemetry events", registry=self.registry
         )
@@ -169,7 +186,95 @@ class RouterMetrics:
             "Canary assignments not admitted for decision capture",
             registry=self.registry,
         )
+        self.request_duration = Histogram(
+            "llm_router_request_duration_seconds",
+            "Terminal request duration",
+            ["protocol", "profile", "status"],
+            registry=self.registry,
+        )
+        self.routing_duration = Histogram(
+            "llm_router_routing_duration_seconds",
+            "Routing duration",
+            ["protocol", "profile", "result"],
+            registry=self.registry,
+        )
+        self.inflight_requests = Gauge(
+            "llm_router_inflight_requests",
+            "Requests currently inside model endpoints",
+            ["protocol"],
+            registry=self.registry,
+        )
+        self.fallbacks = Counter(
+            "llm_router_fallback_total",
+            "Requests using a fallback target",
+            ["protocol", "profile"],
+            registry=self.registry,
+        )
+        self.attempt_duration = Histogram(
+            "llm_router_attempt_duration_seconds",
+            "Provider attempt duration",
+            ["protocol", "provider", "model", "status"],
+            registry=self.registry,
+        )
+        self.tokens = Counter(
+            "llm_router_tokens_total",
+            "Provider-reported normalized token usage",
+            ["protocol", "provider", "model", "kind"],
+            registry=self.registry,
+        )
+        self.usage_observations = Counter(
+            "llm_router_usage_observations_total",
+            "Normalized usage coverage",
+            ["protocol", "status"],
+            registry=self.registry,
+        )
+        self.known_estimated_cost = Counter(
+            "llm_router_known_estimated_cost_total",
+            "Known estimated currency units",
+            ["currency", "provider", "model"],
+            registry=self.registry,
+        )
+        self.cost_observations = Counter(
+            "llm_router_cost_observations_total",
+            "Estimated cost coverage",
+            ["currency", "status"],
+            registry=self.registry,
+        )
+        self.observation_queue_depth = Gauge(
+            "llm_router_observation_queue_depth",
+            "Current durable observation queue depth",
+            registry=self.registry,
+        )
+        self.observation_dropped = Counter(
+            "llm_router_observation_dropped_total",
+            "Dropped terminal observations",
+            ["reason"],
+            registry=self.registry,
+        )
+        self.observation_sink_failures = Counter(
+            "llm_router_observation_sink_failures_total",
+            "Observation sink failures",
+            ["sink", "reason"],
+            registry=self.registry,
+        )
+        self.trace_export = Counter(
+            "llm_router_trace_export_total",
+            "Trace export outcomes",
+            ["exporter", "status"],
+            registry=self.registry,
+        )
+        self.observation_store_size = Gauge(
+            "llm_router_observation_store_size_bytes",
+            "Observation SQLite size",
+            registry=self.registry,
+        )
+        self.duplicate_terminal = Counter(
+            "llm_router_observation_duplicate_terminal_total",
+            "Ignored duplicate terminal lifecycle completions",
+            registry=self.registry,
+        )
         self._targets_by_provider: dict[str, tuple[tuple[str, str], ...]] = {}
+        self._target_tiers: dict[str, str] = {}
 
     def record_canary_runtime(self, state: str, reason: str | None) -> None:
         """Set one startup-fixed state and count bounded fail-open activation."""
@@ -194,6 +299,69 @@ class RouterMetrics:
                 self.canary_decision_capture_gap.inc()
         self.canary_routing.labels(role.value, result).inc()
 
+    def record_observation(self, bundle: ObservationBundle) -> None:
+        """Update complete bounded route, usage, cost, and attempt metrics."""
+
+        event = bundle.observation
+        protocol = event.protocol.value if event.protocol else "unknown"
+        profile = event.profile or "unknown"
+        duration = (event.completed_at - event.received_at).total_seconds()
+        self.requests.labels(
+            protocol, profile, event.status.value, event.terminal_stage.value
+        ).inc()
+        self.request_duration.labels(protocol, profile, event.status.value).observe(duration)
+        self.routing_latency.observe(duration * 1000)
+        if event.routing is not None:
+            self.routing_duration.labels(
+                protocol, profile, event.routing.result
+            ).observe(event.routing.duration_ms / 1000)
+        execution = event.execution
+        provider = execution.final_provider if execution and execution.final_provider else "unknown"
+        model = execution.final_target if execution and execution.final_target else "unknown"
+        if execution is not None:
+            if execution.final_target is not None:
+                self.routes.labels(
+                    profile,
+                    self._target_tiers.get(execution.final_target, "unknown"),
+                    execution.final_target,
+                ).inc()
+            if execution.time_to_first_event_ms is not None:
+                self.first_event_latency.observe(execution.time_to_first_event_ms)
+                self.first_event_duration.labels(protocol, model).observe(
+                    execution.time_to_first_event_ms / 1000
+                )
+            if execution.final_target and event.routing and execution.final_target != event.routing.primary_model:
+                self.fallbacks.labels(protocol, profile).inc()
+            for attempt in execution.attempts:
+                self.attempts.labels(
+                    protocol, attempt.provider, attempt.model, attempt.status
+                ).inc()
+                self.attempt_duration.labels(
+                    protocol, attempt.provider, attempt.model, attempt.status
+                ).observe(attempt.duration_ms / 1000)
+                if not attempt.upstream_invoked:
+                    self.health_skipped.labels(
+                        protocol, attempt.provider, attempt.model
+                    ).inc()
+        if event.error_code == "router_no_available_target":
+            self.no_available_target.labels(protocol, profile).inc()
+        self.usage_observations.labels(protocol, event.usage.status.value).inc()
+        for kind, tokens in (
+            ("input_uncached", event.usage.input_uncached_tokens),
+            ("input_cache_read", event.usage.input_cache_read_tokens),
+            ("input_cache_write", event.usage.input_cache_write_tokens),
+            ("output", event.usage.output_tokens),
+            ("reasoning_output", event.usage.reasoning_output_tokens),
+        ):
+            if tokens is not None:
+                self.tokens.labels(protocol, provider, model, kind).inc(tokens)
+        currency = bundle.cost.currency or "unknown"
+        self.cost_observations.labels(currency, bundle.cost.status.value).inc()
+        if bundle.cost.known_amount_nanos is not None:
+            self.known_estimated_cost.labels(currency, provider, model).inc(
+                bundle.cost.known_amount_nanos / 1_000_000_000
+            )
+
     def initialize_health(self, targets: Mapping[str, ModelTarget]) -> None:
         """Initialize bounded one-hot gauges for configured failure domains."""
 
@@ -212,6 +380,9 @@ class RouterMetrics:
                 self.health_state.labels(protocol, provider, "all", state.value).set(value)
         self._targets_by_provider = {
             provider: tuple(entries) for provider, entries in targets_by_provider.items()
+        }
+        self._target_tiers = {
+            alias: target.tier.value for alias, target in targets.items()
         }
 
     def record_health_snapshot(
@@ -284,23 +455,6 @@ class RouterMetrics:
             self.health_recoveries.labels(
                 protocol, transition.provider, target, "success"
             ).inc()
-
-    def record(self, event: RouteEvent) -> None:
-        """Record one completed route event using bounded configured labels."""
-
-        self.requests.labels(event.profile, event.status).inc()
-        self.routes.labels(event.profile, event.final_model.split(":", 1)[0], event.final_model).inc()
-        self.routing_latency.observe(event.total_latency_ms)
-        if event.time_to_first_event_ms is not None:
-            self.first_event_latency.observe(event.time_to_first_event_ms)
-        for attempt in event.attempts:
-            self.attempts.labels(attempt.provider, attempt.model, attempt.status).inc()
-            if attempt.status == "health_skipped":
-                self.health_skipped.labels(
-                    event.protocol, attempt.provider, attempt.model
-                ).inc()
-        if event.error_code == "router_no_available_target":
-            self.no_available_target.labels(event.protocol, event.profile).inc()
 
     def render(self) -> bytes:
         """Render the private registry in Prometheus text format."""

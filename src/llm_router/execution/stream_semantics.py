@@ -13,6 +13,11 @@ from llm_router.gateway.renderers import (
     OpenAIErrorRenderer,
 )
 from llm_router.health.models import FailureClass
+from llm_router.observability.models import UsageBreakdown
+from llm_router.observability.usage import (
+    normalize_anthropic_usage,
+    normalize_openai_usage,
+)
 
 
 class StreamSemantics(Protocol):
@@ -24,8 +29,8 @@ class StreamSemantics(Protocol):
     def render_post_commit_error(self, code: str) -> bytes:
         """Render one safe protocol-native error event after commit."""
 
-    def extract_usage(self, event: bytes) -> tuple[int | None, int | None]:
-        """Extract bounded usage counters from one complete event."""
+    def extract_usage(self, event: bytes) -> UsageBreakdown | None:
+        """Extract one normalized usage fragment from a complete event."""
 
     def terminal_outcome(self, event: bytes) -> FailureClass | None:
         """Return a bounded outcome when an event terminates the stream."""
@@ -83,23 +88,18 @@ class AnthropicStreamSemantics(_JSONStreamSemantics):
 
         super().__init__(AnthropicErrorRenderer())
 
-    def extract_usage(self, event: bytes) -> tuple[int | None, int | None]:
-        """Extract Anthropic input or output token counters when present."""
+    def extract_usage(self, event: bytes) -> UsageBreakdown | None:
+        """Extract normalized Anthropic usage when present."""
 
         try:
             payload = _event_payload(event)
         except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
-            return None, None
+            return None
         message = payload.get("message")
         usage = message.get("usage") if isinstance(message, Mapping) else payload.get("usage")
         if not isinstance(usage, Mapping):
-            return None, None
-        input_tokens = usage.get("input_tokens")
-        output_tokens = usage.get("output_tokens")
-        return (
-            input_tokens if isinstance(input_tokens, int) else None,
-            output_tokens if isinstance(output_tokens, int) else None,
-        )
+            return None
+        return normalize_anthropic_usage({"usage": usage})
 
     def terminal_outcome(self, event: bytes) -> FailureClass | None:
         """Recognize Anthropic success and upstream error terminal events."""
@@ -124,25 +124,20 @@ class OpenAIStreamSemantics(_JSONStreamSemantics):
 
         super().__init__(OpenAIErrorRenderer())
 
-    def extract_usage(self, event: bytes) -> tuple[int | None, int | None]:
-        """Extract usage only from a completed OpenAI response event."""
+    def extract_usage(self, event: bytes) -> UsageBreakdown | None:
+        """Extract normalized usage only from a completed response event."""
 
         try:
             payload = _event_payload(event)
         except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
-            return None, None
+            return None
         if payload.get("type") != "response.completed":
-            return None, None
+            return None
         response = payload.get("response")
         usage = response.get("usage") if isinstance(response, Mapping) else None
         if not isinstance(usage, Mapping):
-            return None, None
-        input_tokens = usage.get("input_tokens")
-        output_tokens = usage.get("output_tokens")
-        return (
-            input_tokens if isinstance(input_tokens, int) else None,
-            output_tokens if isinstance(output_tokens, int) else None,
-        )
+            return None
+        return normalize_openai_usage({"usage": usage})
 
     def terminal_outcome(self, event: bytes) -> FailureClass | None:
         """Recognize OpenAI Responses success and failure terminal events."""

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from llm_router.domain import AttemptEvent
+from llm_router.domain import AttemptEvent, ExecutionFailureSnapshot
 
 
 @dataclass
@@ -21,6 +21,7 @@ class RouterError(Exception):
     health_skipped_count: int = 0
     health_reason: str | None = None
     health_skipped_attempts: tuple[AttemptEvent, ...] = ()
+    execution: ExecutionFailureSnapshot | None = None
 
     def __str__(self) -> str:
         """Return the sanitized English error message."""

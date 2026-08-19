@@ -19,7 +19,23 @@ The protocol entry points are `POST /v1/messages` and `POST /v1/responses`.
 
 v0.4 keeps Anthropic Messages and OpenAI Responses as separate same-protocol routes. The in-memory health coordinator filters targets in cooldown or blocked state, admits one recovery probe after cooldown, and preserves the configured capability and fallback order. Health is disabled with `health.enabled: false`; no Anthropic/OpenAI protocol conversion is performed.
 
-The example configuration uses `health` defaults suitable for local operation. Health state is process-local and resets on restart. SQLite and metrics contain only bounded route and health observations; request bodies, response bodies, credentials, and reasoning content are not persisted.
+The example configuration uses `health` defaults suitable for local operation. Health state is process-local and resets on restart. SQLite, metrics, and traces contain only bounded observations; request bodies, response bodies, credentials, session identifiers, tool arguments, and reasoning content are not persisted.
+
+Every model response includes Router-owned `x-llm-router-request-id` and `x-llm-router-trace-id` headers. A terminal observation correlates the actual policy, selected and final targets, attempts, latency, Provider-reported usage, known estimated cost, and optional local trace spans. Observability sinks are fail-open and do not change routing or Provider requests.
+
+## Observability Queries
+
+The v0.7 query commands open SQLite read-only and do not load Router YAML, API keys, or Provider clients:
+
+```bash
+llm-router routes --db ~/.llm-router/router.db --last 30
+llm-router trace --db ~/.llm-router/router.db --request <request-uuid>
+llm-router cost --db ~/.llm-router/router.db --today --group-by model --format json
+```
+
+Cost is calculated only from Provider-reported usage and versioned Decimal rates configured on each model. SQLite stores integer nanos and the historical rate snapshot. `complete`, `partial`, `unpriced`, `usage_missing`, and `not_applicable` coverage remain separate; a known partial amount is never presented as total cost or as a Provider invoice. Different currencies are never combined.
+
+Local trace storage is enabled by default. OTLP/HTTP export is optional, uses an independent bounded queue, and is not a readiness dependency. Configure credentials through `observability.tracing.otlp.headers_env`; header values are never recorded. `observability.retention_days` deletes only expired observation tables in batches and leaves Outcome, Replay, Shadow, and Canary evaluation data untouched.
 
 ## Outcome Feedback
 

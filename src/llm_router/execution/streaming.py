@@ -11,11 +11,13 @@ from llm_router.domain import ExecutionStats, ProviderExchange
 from llm_router.errors import RouterError, timeout_error
 from llm_router.execution.stream_semantics import StreamSemantics
 from llm_router.health.models import AttemptOutcome, FailureClass
+from llm_router.observability.models import UsageBreakdown, UsageStatus
+from llm_router.observability.usage import merge_usage
 
 _MAX_USAGE_EVENT_BYTES = 4 * 1024 * 1024
 
 
-class SSEUsageTracker:
+class SSEUsageAccumulator:
     """Observe complete SSE events without changing proxied stream bytes."""
 
     def __init__(self, semantics: StreamSemantics) -> None:
@@ -23,8 +25,8 @@ class SSEUsageTracker:
 
         self._semantics = semantics
         self._buffer = bytearray()
-        self.input_tokens: int | None = None
-        self.output_tokens: int | None = None
+        self.usage = UsageBreakdown.missing()
+        self.overflowed = False
         self.terminal_outcome: FailureClass | None = None
 
     @staticmethod
@@ -47,16 +49,33 @@ class SSEUsageTracker:
             end = index + length
             event = bytes(self._buffer[:end])
             del self._buffer[:end]
-            input_tokens, output_tokens = self._semantics.extract_usage(event)
+            fragment = self._semantics.extract_usage(event)
             terminal_outcome = self._semantics.terminal_outcome(event)
-            if input_tokens is not None:
-                self.input_tokens = input_tokens
-            if output_tokens is not None:
-                self.output_tokens = output_tokens
+            if fragment is not None:
+                self.usage = merge_usage(self.usage, fragment)
             if terminal_outcome is not None:
                 self.terminal_outcome = terminal_outcome
+        if self.overflowed and self.usage.status is UsageStatus.COMPLETE:
+            self.usage = UsageBreakdown(
+                UsageStatus.PARTIAL,
+                self.usage.input_uncached_tokens,
+                self.usage.input_cache_read_tokens,
+                self.usage.input_cache_write_tokens,
+                self.usage.output_tokens,
+                self.usage.reasoning_output_tokens,
+            )
         if len(self._buffer) > _MAX_USAGE_EVENT_BYTES:
             self._buffer.clear()
+            self.overflowed = True
+            if self.usage.status is not UsageStatus.INVALID:
+                self.usage = UsageBreakdown(
+                    UsageStatus.PARTIAL,
+                    self.usage.input_uncached_tokens,
+                    self.usage.input_cache_read_tokens,
+                    self.usage.input_cache_write_tokens,
+                    self.usage.output_tokens,
+                    self.usage.reasoning_output_tokens,
+                )
 
 
 async def read_first_event(exchange: ProviderExchange) -> tuple[bytes, bytes]:
@@ -66,7 +85,7 @@ async def read_first_event(exchange: ProviderExchange) -> tuple[bytes, bytes]:
     try:
         async for chunk in exchange.body:
             buffer.extend(chunk)
-            found = SSEUsageTracker.delimiter(buffer)
+            found = SSEUsageAccumulator.delimiter(buffer)
             if found is not None:
                 index, length = found
                 end = index + length
@@ -105,7 +124,7 @@ async def relay_stream(
     """Relay a committed SSE stream and render protocol-native terminal errors."""
 
     first_event_at = time.monotonic()
-    usage = SSEUsageTracker(semantics)
+    usage = SSEUsageAccumulator(semantics)
     usage.feed(first_event)
     if remainder:
         usage.feed(remainder)
@@ -139,8 +158,7 @@ async def relay_stream(
                             status="error",
                             total_latency_ms=(time.monotonic() - started) * 1000,
                             time_to_first_event_ms=(first_event_at - started) * 1000,
-                            input_tokens=usage.input_tokens,
-                            output_tokens=usage.output_tokens,
+                            usage=usage.usage,
                             error_code="router_upstream_stream_error",
                         )
                     )
@@ -157,8 +175,7 @@ async def relay_stream(
                         status="success",
                         total_latency_ms=(time.monotonic() - started) * 1000,
                         time_to_first_event_ms=(first_event_at - started) * 1000,
-                        input_tokens=usage.input_tokens,
-                        output_tokens=usage.output_tokens,
+                        usage=usage.usage,
                     )
                 )
                 return

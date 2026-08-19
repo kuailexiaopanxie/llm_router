@@ -5,7 +5,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="coding-llm-router",
-    version="0.6.0",
+    version="0.7.0",
     description="Local-first deterministic router for Anthropic Messages and OpenAI Responses",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
@@ -16,6 +16,8 @@ setup(
         "aiosqlite>=0.20,<1",
         "fastapi>=0.115,<1",
         "httpx>=0.27,<1",
+        "opentelemetry-exporter-otlp-proto-http>=1.28,<2",
+        "opentelemetry-sdk>=1.28,<2",
         "prometheus-client>=0.21,<1",
         "pydantic>=2.9,<3",
         "PyYAML>=6.0,<7",

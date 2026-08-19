@@ -126,12 +126,19 @@ class SQLiteCanaryReader:
             parameters.append(utc_text(end))
         uri = f"file:{self._path}?mode=ro"
         with sqlite3.connect(uri, uri=True) as connection:
+            route_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(route_requests)")
+            }
+            known_cost = "r.known_cost_nanos" if "known_cost_nanos" in route_columns else "NULL"
+            cost_status = "r.cost_status" if "cost_status" in route_columns else "NULL"
+            cost_currency = "r.cost_currency" if "cost_currency" in route_columns else "NULL"
             query = f"""
                 SELECT d.request_id, d.recorded_at, d.canary_assignment_json,
                        d.routing_request_json, d.actual_plan_json, d.actual_error_json,
                        r.status, r.primary_model, r.final_model, r.attempt_count,
                        r.total_latency_ms, r.input_tokens, r.output_tokens, r.estimated_cost,
-                       r.error_code,
+                       r.error_code, {known_cost}, {cost_status}, {cost_currency},
                        (SELECT COUNT(*) FROM outcome_events o
                          WHERE o.request_id = d.request_id
                            AND NOT (d.task_id IS NOT NULL AND o.task_id IS NOT NULL
@@ -182,11 +189,14 @@ class SQLiteCanaryReader:
                         "total_latency_ms": row[10],
                         "input_tokens": row[11],
                         "output_tokens": row[12],
-                        "estimated_cost": row[13],
+                        "legacy_estimated_cost": row[13] if row[16] is None else None,
                         "execution_error": row[14],
-                        "outcome_count": row[15],
-                        "outcome_conflicting": int(row[16] or 0) > 1,
-                        "outcome_verdict": row[17] if int(row[16] or 0) == 1 else None,
+                        "known_cost_nanos": row[15],
+                        "cost_status": row[16] or "legacy_unknown",
+                        "cost_currency": row[17],
+                        "outcome_count": row[18],
+                        "outcome_conflicting": int(row[19] or 0) > 1,
+                        "outcome_verdict": row[20] if int(row[19] or 0) == 1 else None,
                     }
                 )
             return result

@@ -21,23 +21,23 @@ from llm_router.evaluation.codec import make_policy_snapshot
 from llm_router.evaluation.models import RouteDecisionInput
 from llm_router.evaluation.sqlite_store import SQLiteEvaluationStore
 from llm_router.health.coordinator import DisabledHealthCoordinator
+from llm_router.observability.sqlite_store import SQLiteObservationStore
 from llm_router.routing.context import RoutingContext
 from llm_router.routing.features import extract_routing_request
 from llm_router.routing.kernel import RoutingKernel
 from llm_router.routing.policy import compile_routing_policy
-from llm_router.telemetry.sqlite_store import SQLiteEventStore
 
 
 def test_canary_report_is_read_only_private_and_denominator_explicit(tmp_path, capsys) -> None:
     """Report captured assignment gaps without exposing affinity or causal claims."""
 
     async def prepare() -> None:
-        """Create compatible telemetry and evaluation tables with one assignment."""
+        """Create compatible observation and evaluation tables with one assignment."""
 
         path = str(tmp_path / "router.db")
-        telemetry = SQLiteEventStore(path)
-        await telemetry.start()
-        await telemetry.close()
+        observations = SQLiteObservationStore(path)
+        await observations.start()
+        await observations.close()
         config = RouterConfig.model_validate(router_config_data())
         policy = compile_routing_policy(config)
         now = datetime.now(UTC)

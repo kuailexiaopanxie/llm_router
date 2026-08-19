@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
-from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC
 from typing import Any
 
 from fastapi import Request
@@ -17,10 +15,17 @@ from llm_router.domain import (
     OutcomeSignal,
     Protocol,
     ProtocolEnvelope,
-    RouteEvent,
 )
 from llm_router.errors import RouterError, invalid_request
-from llm_router.routing.feature_utils import summarize_features
+from llm_router.observability.lifecycle import RequestObservation
+from llm_router.observability.models import (
+    ExecutionObservation,
+    RequestStatus,
+    RoutingObservation,
+    TerminalStage,
+    UsageBreakdown,
+)
+from llm_router.routing.coordinator import RoutingResolution
 
 
 async def read_json_object(request: Request, max_bytes: int) -> dict[str, Any]:
@@ -55,7 +60,9 @@ def provider_extension_headers(config: RouterConfig, protocol: Protocol) -> tupl
     )
 
 
-def route_headers(envelope: ProtocolEnvelope, plan: Any, response: Any) -> dict[str, str]:
+def route_headers(
+    envelope: ProtocolEnvelope, plan: Any, response: Any, trace_id: str
+) -> dict[str, str]:
     """Build stable router response headers from a resolved execution plan."""
 
     reason = plan.route_reason
@@ -63,6 +70,7 @@ def route_headers(envelope: ProtocolEnvelope, plan: Any, response: Any) -> dict[
         reason = ",".join((reason, *plan.auxiliary_reasons))
     return {
         "x-llm-router-request-id": envelope.request_id,
+        "x-llm-router-trace-id": trace_id,
         "x-llm-router-profile": plan.profile,
         "x-llm-router-upstream-model": response.final_target.upstream_model,
         "x-llm-router-route-reason": reason[:256],
@@ -75,114 +83,158 @@ async def record_completion(
     runtime: Any,
     envelope: ProtocolEnvelope,
     routing_request: Any,
-    plan: Any,
     response: Any,
-    usage_extractor: Callable[[bytes], tuple[int | None, int | None]],
-    task_id: str | None = None,
+    lifecycle: RequestObservation,
     session_key: str | None = None,
 ) -> None:
-    """Record bounded completion telemetry and opt-in session state."""
+    """Apply session outcome and finish one execution lifecycle."""
 
     try:
         stats: ExecutionStats = await response.completion
-        if isinstance(response.body, bytes):
-            input_tokens, output_tokens = usage_extractor(response.body)
-            stats = replace(stats, input_tokens=input_tokens, output_tokens=output_tokens)
-        status = stats.status
-        outcome = routing_request.outcome_signal
-        if outcome is not OutcomeSignal.UNKNOWN and not envelope.endpoint.endswith("count_tokens"):
+    except Exception:  # noqa: BLE001 - completion futures are an isolation boundary.
+        logging.getLogger("llm_router.gateway").error(
+            "Response completion tracking failed",
+            extra={"event": "completion_tracking_failed", "request_id": envelope.request_id},
+        )
+        lifecycle.finish(
+            RequestStatus.ERROR,
+            TerminalStage.EXECUTION_POST_COMMIT if envelope.stream else TerminalStage.EXECUTION_PRE_COMMIT,
+            "router_internal_error",
+        )
+        return
+    outcome = routing_request.outcome_signal
+    if outcome is not OutcomeSignal.UNKNOWN and not envelope.endpoint.endswith("count_tokens"):
+        try:
             runtime.sessions.record(session_key, response.final_target.tier, outcome)
-        runtime.telemetry.record(
-            RouteEvent(
-                request_id=envelope.request_id,
-                task_id=task_id,
-                received_at=envelope.received_at,
-                protocol=envelope.protocol.value,
-                profile=plan.profile,
-                stream=envelope.stream,
-                feature_summary=summarize_features(routing_request),
-                primary_model=plan.primary.alias,
-                final_model=response.final_target.alias,
-                route_reason=plan.route_reason,
-                policy_version=plan.policy_version,
-                status=status,
-                attempt_count=response.attempt_count,
-                time_to_first_event_ms=stats.time_to_first_event_ms,
-                total_latency_ms=stats.total_latency_ms,
-                input_tokens=stats.input_tokens,
-                output_tokens=stats.output_tokens,
-                error_code=stats.error_code,
-                attempts=response.attempts,
-                inbound_protocol=envelope.protocol.value,
-                target_protocol=response.final_target.protocol.value,
-                provider_account_scope=response.final_target.state_scope,
-                response_state_requested=routing_request.response_state_requested,
-                health_enabled=runtime.config.health.enabled,
-                health_snapshot_revision=plan.health_snapshot_revision,
-                health_filtered_count=plan.health_filtered_count,
-                health_skipped_count=response.health_skipped_count,
-                health_reason=plan.health_reason,
+        except Exception:  # noqa: BLE001 - session state must not block observations.
+            logging.getLogger("llm_router.gateway").error(
+                "Session outcome update failed",
+                extra={"event": "session_outcome_failed", "request_id": envelope.request_id},
             )
-        )
-    except Exception:
-        logging.getLogger("llm_router.gateway").exception(
-            "completion telemetry failed",
-            extra={"event": "completion_telemetry_failed", "request_id": envelope.request_id},
-        )
-
-
-def record_route_failure(
-    runtime: Any,
-    envelope: ProtocolEnvelope,
-    routing_request: Any,
-    availability: Any,
-    error: RouterError,
-    plan: Any | None = None,
-    task_id: str | None = None,
-    policy_version: str | None = None,
-) -> None:
-    """Record a bounded no-available-target failure without session updates."""
-
     try:
-        snapshot_revision = (
-            error.health_snapshot_revision
-            or (plan.health_snapshot_revision if plan is not None else getattr(availability, "revision", 0))
+        usage = stats.usage or (
+            UsageBreakdown.not_applicable()
+            if envelope.endpoint.endswith("count_tokens")
+            else UsageBreakdown.missing()
         )
-        filtered_count = (
-            error.health_filtered_count
-            or (plan.health_filtered_count if plan is not None else 0)
+        lifecycle.executing(
+            ExecutionObservation(
+                response.attempts[0].started_at if response.attempts else envelope.received_at,
+                stats.total_latency_ms,
+                stats.time_to_first_event_ms,
+                response.final_target.alias,
+                response.final_target.provider,
+                response.attempt_count,
+                response.health_skipped_count,
+                True,
+                stats.status,
+                response.attempts,
+            ),
+            usage,
         )
-        health_reason = error.health_reason or "health_no_available_target"
-        runtime.telemetry.record(
-            RouteEvent(
-                request_id=envelope.request_id,
-                task_id=task_id,
-                received_at=envelope.received_at,
-                protocol=envelope.protocol.value,
-                profile=routing_request.requested_profile,
-                stream=envelope.stream,
-                feature_summary=summarize_features(routing_request),
-                primary_model="none",
-                final_model="none",
-                route_reason=health_reason,
-                policy_version=policy_version or runtime.config.effective_policy_version,
-                status="error",
-                attempt_count=0,
-                total_latency_ms=(datetime.now(timezone.utc) - envelope.received_at).total_seconds()
-                * 1000,
-                error_code=error.code,
-                attempts=error.health_skipped_attempts,
-                inbound_protocol=envelope.protocol.value,
-                response_state_requested=routing_request.response_state_requested,
-                health_enabled=runtime.config.health.enabled,
-                health_snapshot_revision=snapshot_revision,
-                health_filtered_count=filtered_count,
-                health_skipped_count=error.health_skipped_count,
-                health_reason=health_reason,
-            )
+        status = RequestStatus(stats.status)
+        stage = (
+            TerminalStage.COMPLETED
+            if status is RequestStatus.SUCCESS
+            else TerminalStage.EXECUTION_POST_COMMIT
+            if envelope.stream
+            else TerminalStage.EXECUTION_PRE_COMMIT
         )
-    except Exception:
-        logging.getLogger("llm_router.gateway").exception(
-            "route failure telemetry failed",
-            extra={"event": "route_failure_telemetry_failed", "request_id": envelope.request_id},
+        lifecycle.finish(status, stage, stats.error_code)
+    except Exception:  # noqa: BLE001 - completion observation must remain fail-open.
+        logging.getLogger("llm_router.gateway").error(
+            "Request observation completion failed",
+            extra={"event": "completion_observation_failed", "request_id": envelope.request_id},
         )
+        lifecycle.finish(
+            RequestStatus.ERROR,
+            (
+                TerminalStage.EXECUTION_POST_COMMIT
+                if envelope.stream
+                else TerminalStage.EXECUTION_PRE_COMMIT
+            ),
+            "router_internal_error",
+        )
+
+
+def routing_facts(
+    resolution: RoutingResolution, requested_profile: str
+) -> RoutingObservation:
+    """Convert one actual resolution into bounded routing observation facts."""
+
+    assignment = resolution.assignment
+    plan = resolution.plan
+    error = resolution.error
+    return RoutingObservation(
+        requested_profile=requested_profile,
+        effective_profile=plan.profile if plan else None,
+        started_at=resolution.started_at,
+        duration_ms=resolution.duration_ms,
+        primary_model=plan.primary.alias if plan else None,
+        target_aliases=tuple(target.alias for target in plan.targets) if plan else (),
+        policy_version=resolution.policy_version,
+        policy_hash=resolution.routing_policy_hash,
+        policy_role=assignment.role.value if assignment else "control",
+        assignment_reason=assignment.reason.value if assignment else None,
+        route_reason=plan.route_reason if plan else error.health_reason if error else None,
+        auxiliary_reasons=plan.auxiliary_reasons if plan else (),
+        health_snapshot_revision=(
+            plan.health_snapshot_revision
+            if plan
+            else error.health_snapshot_revision
+            if error
+            else 0
+        ),
+        health_filtered_count=(
+            plan.health_filtered_count
+            if plan
+            else error.health_filtered_count
+            if error
+            else 0
+        ),
+        health_reason=plan.health_reason if plan else error.health_reason if error else None,
+        result="plan" if plan else "error",
+    )
+
+
+def execution_failure_facts(error: RouterError) -> ExecutionObservation | None:
+    """Convert an attached bounded execution failure snapshot."""
+
+    failure = error.execution
+    if failure is None:
+        return None
+    final = next(
+        (attempt for attempt in reversed(failure.attempts) if attempt.upstream_invoked),
+        None,
+    )
+    return ExecutionObservation(
+        failure.started_at.astimezone(UTC),
+        failure.duration_ms,
+        None,
+        final.model if final else None,
+        final.provider if final else None,
+        failure.upstream_attempt_count,
+        failure.health_skipped_count,
+        failure.committed,
+        "error",
+        failure.attempts,
+    )
+
+
+def finish_error(
+    lifecycle: RequestObservation,
+    error: RouterError,
+    stage: TerminalStage,
+) -> None:
+    """Finish one expected error with attached execution facts when present."""
+
+    execution = execution_failure_facts(error)
+    if execution is not None:
+        lifecycle.executing(execution, UsageBreakdown.missing())
+        stage = TerminalStage.EXECUTION_PRE_COMMIT
+    status = (
+        RequestStatus.CANCELLED
+        if error.code == "router_cancelled"
+        else RequestStatus.ERROR
+    )
+    lifecycle.finish(status, stage, error.code)

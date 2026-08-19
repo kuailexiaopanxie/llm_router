@@ -1,2 +1,0 @@
-"""Sanitized telemetry and persistence."""
-

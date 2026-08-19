@@ -23,7 +23,7 @@ from llm_router.evaluation.outcomes import (
 )
 from llm_router.evaluation.port import OutcomeConflictError
 from llm_router.gateway.auth import authenticate, request_id
-from llm_router.telemetry.metrics import RouterMetrics
+from llm_router.observability.metrics import RouterMetrics
 
 
 class OutcomeRequest(BaseModel):

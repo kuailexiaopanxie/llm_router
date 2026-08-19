@@ -13,7 +13,7 @@ from llm_router.evaluation.codec import (
 )
 from llm_router.evaluation.models import RouteDecisionInput
 from llm_router.evaluation.port import DecisionStorePort
-from llm_router.telemetry.metrics import RouterMetrics
+from llm_router.observability.metrics import RouterMetrics
 
 
 class DecisionRecorderPort(Protocol):

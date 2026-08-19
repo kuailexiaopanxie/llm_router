@@ -50,6 +50,16 @@ def _role_report(rows: Sequence[dict[str, object]]) -> dict[str, object]:
     comparable_outcomes = [row for row in outcome_rows if not row["outcome_conflicting"]]
     outcome_successes = sum(row["outcome_verdict"] == "success" for row in comparable_outcomes)
     latencies = [_number(row["total_latency_ms"]) for row in completed_rows]
+    cost_statuses = Counter(str(row["cost_status"]) for row in completed_rows)
+    known_costs: dict[str, int] = {}
+    legacy_estimate = 0.0
+    for row in completed_rows:
+        currency = row["cost_currency"]
+        amount = row["known_cost_nanos"]
+        if isinstance(currency, str) and isinstance(amount, int):
+            known_costs[currency] = known_costs.get(currency, 0) + amount
+        if row["cost_status"] == "legacy_unknown":
+            legacy_estimate += _number(row["legacy_estimated_cost"])
     return {
         "assigned": assigned,
         "planned": sum(bool(row["planned"]) for row in rows),
@@ -79,7 +89,9 @@ def _role_report(rows: Sequence[dict[str, object]]) -> dict[str, object]:
         },
         "input_tokens": sum(_integer(row["input_tokens"]) for row in completed_rows),
         "output_tokens": sum(_integer(row["output_tokens"]) for row in completed_rows),
-        "estimated_cost": sum(_number(row["estimated_cost"]) for row in completed_rows),
+        "known_cost_nanos": dict(sorted(known_costs.items())),
+        "cost_coverage": dict(sorted(cost_statuses.items())),
+        "legacy_estimate": legacy_estimate,
         "final_targets": dict(
             sorted(
                 Counter(

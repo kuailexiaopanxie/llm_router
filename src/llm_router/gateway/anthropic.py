@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -22,13 +21,16 @@ from llm_router.gateway.auth import (
     task_id,
 )
 from llm_router.gateway.common import (
+    finish_error,
     provider_extension_headers,
     read_json_object,
     record_completion,
-    record_route_failure,
     route_headers,
+    routing_facts,
 )
 from llm_router.gateway.renderers import AnthropicErrorRenderer
+from llm_router.observability.models import EndpointKind, RequestStatus, TerminalStage
+from llm_router.observability.tracing import trace_context
 from llm_router.routing.coordinator import RoutingInvocation
 from llm_router.routing.features import extract_routing_request
 
@@ -42,40 +44,29 @@ class AnthropicGateway:
         self._runtime = runtime
         self._errors = AnthropicErrorRenderer()
 
-    @staticmethod
-    def _usage(payload: bytes) -> tuple[int | None, int | None]:
-        """Extract aggregate token counts from a non-stream response when present."""
-
-        try:
-            body = json.loads(payload)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return None, None
-        usage = body.get("usage") if isinstance(body, dict) else None
-        if not isinstance(usage, dict):
-            return None, None
-        input_tokens = usage.get("input_tokens")
-        output_tokens = usage.get("output_tokens")
-        return (
-            input_tokens if isinstance(input_tokens, int) else None,
-            output_tokens if isinstance(output_tokens, int) else None,
-        )
-
     async def handle(self, request: Request, count_only: bool = False) -> Response:
         """Handle one Anthropic Messages or count-tokens request."""
 
         runtime = self._runtime
         config = runtime.config
         rid = request_id(request.headers)
-        stage = "authenticate"
+        received_at = datetime.now(UTC)
+        trace = trace_context(
+            request.headers.get("traceparent"),
+            config.observability.tracing.accept_traceparent,
+        )
+        lifecycle = runtime.observation_registry.open(
+            UUID(rid),
+            trace,
+            received_at,
+            EndpointKind.COUNT_TOKENS if count_only else EndpointKind.MESSAGES,
+        )
+        stage = TerminalStage.AUTHENTICATION
         envelope = None
         routing_request = None
-        availability = None
-        plan = None
-        task = None
-        selected_policy_version = None
         try:
             authenticate(request.headers, runtime.client_key)
-            stage = "read_request"
+            stage = TerminalStage.VALIDATION
             body = await read_json_object(request, config.server.max_request_bytes)
             model = body.get("model", config.routing.default_profile)
             if not isinstance(model, str) or not model:
@@ -90,11 +81,19 @@ class AnthropicGateway:
                 raw_body=body,
                 safe_headers=safe_headers(request.headers, extension_headers),
                 stream=body.get("stream") is True and not count_only,
-                received_at=datetime.now(timezone.utc),
+                received_at=received_at,
                 endpoint="/v1/messages/count_tokens" if count_only else "/v1/messages",
+                traceparent=f"00-{trace.trace_id}-{trace.root_span_id}-01",
             )
-            stage = "route"
             routing_request = extract_routing_request(body, model, count_only=count_only)
+            observed_profile = model if model in config.profiles else None
+            lifecycle.request_facts(
+                protocol,
+                observed_profile,
+                envelope.stream,
+                UUID(task) if task else None,
+            )
+            stage = TerminalStage.ROUTING
             if runtime.coordinator is None:
                 raise internal_error()
             resolution = runtime.coordinator.resolve(
@@ -106,18 +105,23 @@ class AnthropicGateway:
                     routing_request,
                 )
             )
-            selected_policy_version = resolution.policy_version
+            lifecycle.routed(routing_facts(resolution, observed_profile or "unknown"))
             if resolution.error is not None:
                 raise resolution.error
             assert resolution.plan is not None
             plan = resolution.plan
-            stage = "execute"
+            stage = TerminalStage.EXECUTION_PRE_COMMIT
             response = await runtime.engine.execute(envelope, plan)
-            stage = "build_response"
-            headers = route_headers(envelope, plan, response)
+            lifecycle.execution_started(envelope.stream)
+            headers = route_headers(envelope, plan, response, trace.trace_id)
             asyncio.create_task(
                 record_completion(
-                    runtime, envelope, routing_request, plan, response, self._usage, task, session_key
+                    runtime,
+                    envelope,
+                    routing_request,
+                    response,
+                    lifecycle,
+                    session_key,
                 )
             )
             headers.update(response.headers)
@@ -135,32 +139,24 @@ class AnthropicGateway:
                 media_type=response.media_type,
             )
         except RouterError as error:
-            if (
-                error.code == "router_no_available_target"
-                and envelope is not None
-                and routing_request is not None
-            ):
-                record_route_failure(
-                    runtime,
-                    envelope,
-                    routing_request,
-                    availability,
-                    error,
-                    plan,
-                    task,
-                    selected_policy_version,
-                )
-            return self._errors.json_error(error, rid)
-        except Exception:
-            logging.getLogger("llm_router.gateway").exception(
-                "request handling failed",
+            finish_error(lifecycle, error, stage)
+            return self._errors.json_error(error, rid, trace.trace_id)
+        except asyncio.CancelledError:
+            lifecycle.finish(
+                RequestStatus.CANCELLED,
+                stage,
+                "router_cancelled",
+            )
+            raise
+        except Exception:  # noqa: BLE001 - sanitize the endpoint boundary.
+            logging.getLogger("llm_router.gateway").error(
+                "Request handling failed",
                 extra={
                     "event": "request_handling_failed",
                     "request_id": rid,
-                    "stage": stage,
+                    "stage": stage.value,
                 },
             )
-            response_error = internal_error() if stage == "route" else invalid_request(
-                "The request could not be processed."
-            )
-            return self._errors.json_error(response_error, rid)
+            response_error = internal_error()
+            finish_error(lifecycle, response_error, stage)
+            return self._errors.json_error(response_error, rid, trace.trace_id)

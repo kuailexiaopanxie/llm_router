@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, Response
 
 from llm_router.config import RouterConfig, load_config
 from llm_router.domain import ModelTarget, Protocol
-from llm_router.errors import not_ready
+from llm_router.errors import RouterError, not_ready
 from llm_router.evaluation.outcomes import OutcomeService
 from llm_router.evaluation.recorder import DecisionRecorder, NoopDecisionRecorder
 from llm_router.evaluation.shadow import ShadowEvaluator
@@ -27,6 +27,7 @@ from llm_router.execution.stream_semantics import (
     OpenAIStreamSemantics,
 )
 from llm_router.gateway.anthropic import AnthropicGateway
+from llm_router.gateway.auth import authenticate, request_id
 from llm_router.gateway.openai import OpenAIResponsesGateway
 from llm_router.gateway.outcomes import register_outcome_route
 from llm_router.gateway.renderers import AnthropicErrorRenderer
@@ -36,6 +37,15 @@ from llm_router.health.coordinator import (
 )
 from llm_router.health.models import AvailabilitySnapshot, HealthTransition
 from llm_router.health.port import HealthPort
+from llm_router.observability.hub import ObservationHub
+from llm_router.observability.lifecycle import ActiveObservationRegistry
+from llm_router.observability.metrics import RouterMetrics
+from llm_router.observability.otlp import OtlpTraceExporter
+from llm_router.observability.port import NoopTraceExporter
+from llm_router.observability.pricing import CostCalculator, PricingCatalog
+from llm_router.observability.retention import RetentionWorker
+from llm_router.observability.sqlite_store import SQLiteObservationStore
+from llm_router.observability.tracing import TraceBuilder
 from llm_router.providers.registry import ProviderRegistry
 from llm_router.routing.canary import (
     CanaryRuntimeState,
@@ -47,9 +57,6 @@ from llm_router.routing.coordinator import RoutingCoordinator
 from llm_router.routing.kernel import RoutingKernel
 from llm_router.routing.policy import compile_routing_policy
 from llm_router.routing.session import SessionStateStore
-from llm_router.telemetry.metrics import RouterMetrics
-from llm_router.telemetry.recorder import TelemetryRecorder
-from llm_router.telemetry.sqlite_store import SQLiteEventStore
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -99,7 +106,10 @@ class Runtime:
     engine: ExecutionEngine
     kernel: RoutingKernel
     sessions: SessionStateStore
-    telemetry: TelemetryRecorder
+    observations: ObservationHub
+    observation_store: SQLiteObservationStore
+    observation_registry: ActiveObservationRegistry
+    retention: RetentionWorker | None
     metrics: RouterMetrics
     health: HealthPort
     coordinator: RoutingCoordinator | None
@@ -143,10 +153,10 @@ def _health_observer(
                 provider_protocols[transition.provider],
             )
             metrics.record_health_snapshot(snapshot(), targets)
-        except Exception:
+        except Exception:  # noqa: BLE001 - health observation remains fail-open.
             metrics.health_update_failures.inc()
-            logger.exception(
-                "provider health metrics update failed",
+            logger.error(
+                "Provider health metrics update failed",
                 extra={"event": "provider_health_metrics_failed"},
             )
 
@@ -181,8 +191,34 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
         health_reference["health"] = health
     else:
         health = DisabledHealthCoordinator(targets)
-    telemetry = TelemetryRecorder(
-        SQLiteEventStore(config.storage.sqlite_path), metrics, config.storage.queue_capacity
+    observation_store = SQLiteObservationStore(config.storage.sqlite_path)
+    exporter = (
+        OtlpTraceExporter(config.observability.tracing.otlp, metrics)
+        if config.observability.tracing.otlp.enabled
+        else NoopTraceExporter()
+    )
+    observations = ObservationHub(
+        observation_store,
+        metrics,
+        CostCalculator(PricingCatalog.from_config(config)),
+        TraceBuilder(
+            config.observability.tracing.sample_rate,
+            config.observability.tracing.enabled,
+        ),
+        exporter,
+        config.observability.capture_enabled,
+        config.observability.queue_capacity,
+        config.observability.tracing.local_store,
+    )
+    retention = (
+        RetentionWorker(
+            config.storage.sqlite_path,
+            config.observability.retention_days,
+            metrics,
+        )
+        if config.observability.capture_enabled
+        and config.observability.retention_days is not None
+        else None
     )
     policy = compile_routing_policy(config)
     evaluation = (
@@ -217,7 +253,10 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
         ),
         kernel=kernel,
         sessions=sessions,
-        telemetry=telemetry,
+        observations=observations,
+        observation_store=observation_store,
+        observation_registry=ActiveObservationRegistry(observations, metrics),
+        retention=retention,
         metrics=metrics,
         health=health,
         coordinator=None,
@@ -231,9 +270,13 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        """Start and stop telemetry/providers with a bounded shutdown drain."""
+        """Start and stop observations and providers with bounded drains."""
 
-        await runtime.telemetry.start()
+        if runtime.config.observability.capture_enabled:
+            await runtime.observation_store.start()
+        await runtime.observations.start()
+        if runtime.retention is not None:
+            await runtime.retention.start()
         selector: PolicySelectorPort = CurrentPolicySelector(runtime.kernel)
         shadow_port = None
         if runtime.evaluation is not None:
@@ -278,16 +321,20 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
         finally:
             runtime.ready = False
             runtime.coordinator = None
+            runtime.observation_registry.abandon_all()
             if runtime.shadow_evaluator is not None:
                 await runtime.shadow_evaluator.close()
             if runtime.decision_recorder is not None:
                 await runtime.decision_recorder.close()
             if runtime.evaluation is not None:
                 await runtime.evaluation.close()
-            await runtime.telemetry.close()
+            if runtime.retention is not None:
+                await runtime.retention.close()
+            await runtime.observations.close()
+            await runtime.observation_store.close()
             await runtime.providers.close()
 
-    app = FastAPI(title="Coding LLM Router", version="0.6.0", lifespan=lifespan)
+    app = FastAPI(title="Coding LLM Router", version="0.7.0", lifespan=lifespan)
     app.state.runtime = runtime
     if config.outcomes.enabled and evaluation is not None:
         register_outcome_route(
@@ -328,7 +375,7 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
 
     @app.get("/ready")
     async def ready() -> Response:
-        """Return readiness only after telemetry initialization completes."""
+        """Return readiness only after observation initialization completes."""
 
         if not runtime.ready:
             error = not_ready()
@@ -336,10 +383,17 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
         return JSONResponse({"status": "ready"})
 
     @app.get("/metrics")
-    async def metrics_endpoint() -> Response:
+    async def metrics_endpoint(request: Request) -> Response:
         """Expose local Prometheus metrics."""
 
-        return Response(content=runtime.metrics.render(), media_type="text/plain; version=0.6.0")
+        if not runtime.config.observability.metrics.enabled:
+            return Response(status_code=404)
+        if runtime.config.observability.metrics.require_auth:
+            try:
+                authenticate(request.headers, runtime.client_key)
+            except RouterError as error:
+                return AnthropicErrorRenderer().json_error(error, request_id(request.headers))
+        return Response(content=runtime.metrics.render(), media_type="text/plain; version=0.7.0")
 
     return app
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,11 +17,11 @@ from llm_router.evaluation.models import RouteDecisionInput, RouterErrorSnapshot
 from llm_router.evaluation.recorder import DecisionRecorderPort
 from llm_router.evaluation.shadow import NoopShadowEvaluator, ShadowEvaluatorPort
 from llm_router.health.port import HealthPort
+from llm_router.observability.metrics import RouterMetrics
 from llm_router.routing.canary import PolicySelectorPort
 from llm_router.routing.context import RoutingContext
 from llm_router.routing.policy import RoutingPolicy
 from llm_router.routing.session import SessionStateStore
-from llm_router.telemetry.metrics import RouterMetrics
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,8 @@ class RoutingResolution:
     routing_policy_hash: str
     policy_version: str
     assignment: CanaryAssignment | None
+    started_at: datetime
+    duration_ms: float
 
     def __post_init__(self) -> None:
         """Require exactly one plan or expected routing error."""
@@ -77,9 +80,10 @@ class RoutingCoordinator:
     def resolve(self, invocation: RoutingInvocation) -> RoutingResolution:
         """Select once, snapshot once, and resolve through exactly one Kernel."""
 
+        now = self._clock().astimezone(UTC)
+        started = time.monotonic()
         selection = self._selector.select(invocation)
         policy = selection.kernel.policy
-        now = self._clock().astimezone(UTC)
         context = RoutingContext(
             session=self._sessions.routing_snapshot(invocation.session_key),
             availability=self._health.snapshot(now),
@@ -103,6 +107,8 @@ class RoutingCoordinator:
                 policy.routing_policy_hash,
                 policy.effective_policy_version,
                 selection.assignment,
+                now,
+                (time.monotonic() - started) * 1000,
             )
         except Exception:
             self._record_metrics(selection.assignment, "internal_error", False)
@@ -126,6 +132,8 @@ class RoutingCoordinator:
             policy.routing_policy_hash,
             policy.effective_policy_version,
             selection.assignment,
+            now,
+            (time.monotonic() - started) * 1000,
         )
 
     def _capture(

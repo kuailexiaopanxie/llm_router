@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from llm_router.canary_config import CanaryConfig, CandidatePolicyConfig
 from llm_router.domain import Capability, ExecutionTimeouts, ModelTarget, Protocol, Tier
+from llm_router.observability.config import ObservabilityConfig, PricingConfig
 
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 
@@ -133,6 +134,7 @@ class ProviderConfig(StrictModel):
     auth_scheme: Literal["x_api_key", "bearer"] = "x_api_key"
     max_concurrency: int = Field(default=16, ge=1, le=1024)
     extension_headers: tuple[str, ...] = ()
+    propagate_trace_context: bool = False
 
     @model_validator(mode="after")
     def validate_base_url(self) -> ProviderConfig:
@@ -155,6 +157,7 @@ class ModelConfig(StrictModel):
     max_input_tokens: int = Field(gt=0)
     input_price_per_million: float | None = Field(default=None, ge=0)
     output_price_per_million: float | None = Field(default=None, ge=0)
+    pricing: PricingConfig | None = None
     protocol: Protocol = Protocol.ANTHROPIC_MESSAGES
     state_scope: str | None = Field(
         default=None,
@@ -168,6 +171,11 @@ class ModelConfig(StrictModel):
 
         if not self.provider.strip() or not self.upstream_model.strip():
             raise ValueError("model provider and upstream_model must be non-empty")
+        if self.pricing is not None and (
+            self.input_price_per_million is not None
+            or self.output_price_per_million is not None
+        ):
+            raise ValueError("legacy and versioned model pricing cannot be configured together")
         return self
 
 
@@ -265,6 +273,7 @@ class RouterConfig(StrictModel):
     shadow: ShadowConfig = Field(default_factory=ShadowConfig)
     candidate_policy: CandidatePolicyConfig | None = None
     canary: CanaryConfig = Field(default_factory=CanaryConfig)
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     providers: dict[str, ProviderConfig]
     models: dict[str, ModelConfig]
@@ -272,11 +281,35 @@ class RouterConfig(StrictModel):
     routing: RoutingConfig
     timeouts: TimeoutConfig
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_observation_queue_alias(cls, value: object) -> object:
+        """Use the legacy storage queue as the observability queue default."""
+
+        if not isinstance(value, dict):
+            return value
+        result = dict(value)
+        storage = result.get("storage")
+        observability = result.get("observability")
+        if isinstance(storage, dict) and "queue_capacity" in storage:
+            observed = dict(observability) if isinstance(observability, dict) else {}
+            observed.setdefault("queue_capacity", storage["queue_capacity"])
+            result["observability"] = observed
+        return result
+
     @model_validator(mode="after")
     def validate_references(self) -> RouterConfig:
         """Validate provider, profile, capability, and fallback graph integrity."""
 
         alias_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+        if self.storage.queue_capacity != self.observability.queue_capacity:
+            raise ValueError("storage and observability queue_capacity must match")
+        try:
+            listener_loopback = ipaddress.ip_address(self.server.host).is_loopback
+        except ValueError:
+            listener_loopback = self.server.host == "localhost"
+        if not listener_loopback and not self.observability.metrics.require_auth:
+            raise ValueError("remote metrics exposure requires metrics.require_auth=true")
         invalid_aliases = [alias for alias in self.models if not alias_pattern.fullmatch(alias)]
         if invalid_aliases:
             raise ValueError(f"invalid model alias: {invalid_aliases[0]!r}")

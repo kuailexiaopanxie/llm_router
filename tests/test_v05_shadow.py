@@ -30,11 +30,11 @@ from llm_router.evaluation.shadow import ShadowEvaluator
 from llm_router.evaluation.shadow_sqlite import SQLiteShadowReader
 from llm_router.evaluation.sqlite_store import SQLiteEvaluationStore
 from llm_router.health.coordinator import DisabledHealthCoordinator
+from llm_router.observability.metrics import RouterMetrics
 from llm_router.routing.context import RoutingContext
 from llm_router.routing.features import extract_routing_request
 from llm_router.routing.kernel import RoutingKernel
 from llm_router.routing.policy import compile_routing_policy
-from llm_router.telemetry.metrics import RouterMetrics
 
 
 def test_shadow_config_defaults_and_candidate_loader_ignores_recursion(tmp_path) -> None:
