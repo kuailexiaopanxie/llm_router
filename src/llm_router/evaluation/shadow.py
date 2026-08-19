@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Protocol
 
+from llm_router.evaluation.canary_models import PolicyRole
 from llm_router.evaluation.models import (
     ReplayCase,
     ReplayResult,
@@ -115,6 +116,12 @@ class ShadowEvaluator:
         try:
             if self._stopping or self._worker is None:
                 self._admission("disabled")
+                return
+            if (
+                decision.canary_assignment is not None
+                and decision.canary_assignment.role is PolicyRole.CANARY
+            ):
+                self._admission("actual_is_candidate")
                 return
             if not self._candidate_available:
                 self._admission("unavailable")

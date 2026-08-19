@@ -13,6 +13,7 @@ from prometheus_client import (
 )
 
 from llm_router.domain import ModelTarget, RouteEvent
+from llm_router.evaluation.canary_models import CanaryAssignment, PolicyRole
 from llm_router.health.models import AvailabilitySnapshot, HealthState, HealthTransition
 
 
@@ -139,7 +140,59 @@ class RouterMetrics:
             "Shadow evaluation duration",
             registry=self.registry,
         )
+        self.canary_runtime_state = Gauge(
+            "llm_router_canary_runtime_state",
+            "Startup-fixed Canary runtime state",
+            ["state"],
+            registry=self.registry,
+        )
+        self.canary_assignment = Counter(
+            "llm_router_canary_assignment_total",
+            "Canary assignments by bounded role and reason",
+            ["role", "reason"],
+            registry=self.registry,
+        )
+        self.canary_routing = Counter(
+            "llm_router_canary_routing_total",
+            "Selected policy routing results",
+            ["role", "result"],
+            registry=self.registry,
+        )
+        self.canary_fail_open = Counter(
+            "llm_router_canary_fail_open_total",
+            "Canary control-plane fail-open reasons",
+            ["reason"],
+            registry=self.registry,
+        )
+        self.canary_decision_capture_gap = Counter(
+            "llm_router_canary_decision_capture_gap_total",
+            "Canary assignments not admitted for decision capture",
+            registry=self.registry,
+        )
         self._targets_by_provider: dict[str, tuple[tuple[str, str], ...]] = {}
+
+    def record_canary_runtime(self, state: str, reason: str | None) -> None:
+        """Set one startup-fixed state and count bounded fail-open activation."""
+
+        for candidate in ("disabled", "active", "inactive"):
+            self.canary_runtime_state.labels(candidate).set(1 if candidate == state else 0)
+        if state == "inactive" and reason is not None:
+            self.canary_fail_open.labels(reason).inc()
+
+    def record_canary_resolution(
+        self,
+        assignment: CanaryAssignment | None,
+        result: str,
+        captured: bool,
+    ) -> None:
+        """Record one bounded selected-policy routing result."""
+
+        role = assignment.role if assignment is not None else PolicyRole.CONTROL
+        if assignment is not None:
+            self.canary_assignment.labels(role.value, assignment.reason.value).inc()
+            if not captured:
+                self.canary_decision_capture_gap.inc()
+        self.canary_routing.labels(role.value, result).inc()
 
     def initialize_health(self, targets: Mapping[str, ModelTarget]) -> None:
         """Initialize bounded one-hot gauges for configured failure domains."""

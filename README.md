@@ -79,3 +79,16 @@ llm-router shadow-report \
 ```
 
 The report describes structural changes and actual Outcome coverage only. It does not estimate candidate success rate, quality, cost, latency, or expected answers. Set `shadow.enabled: false` and restart to roll back shadow admission; retained shadow records remain readable.
+
+## Controlled Canary Routing
+
+v0.6 can route a bounded cohort of eligible requests through one reviewed Candidate policy. Assignment is stable HMAC-based affinity using session, task, then request identity. Each request selects exactly one policy and invokes the existing execution engine at most once; a Candidate routing or Provider failure never falls back across policies to Current.
+
+The operational sequence is manual and restart-bound:
+
+1. Run Shadow with the fixed Candidate until every declared segment meets its persisted gate.
+2. Set `candidate_policy.expected_policy_hash`, provide a secret salt of at least 32 bytes through `LLM_ROUTER_CANARY_SALT`, enable Canary at a small rate, and restart.
+3. Inspect actual observations with `llm-router canary-report --db ~/.llm-router/router.db --format table`.
+4. Increase the rate, promote by replacing Current, or roll back with `canary.enabled: false`; every change requires restart.
+
+The startup gate checks replayability and known evaluation failures, not quality or causality. `canary-report` opens SQLite read-only and reports explicit denominators, completion gaps, Outcome coverage, and conflicts. It does not compute uplift, statistical significance, or an automatic promotion decision. Stateful response requests without session/task affinity and count-token requests remain on Current.

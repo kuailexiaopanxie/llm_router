@@ -46,6 +46,22 @@ def task_id(headers: Mapping[str, str]) -> str | None:
         raise invalid_request("The x-llm-router-task-id header must be a UUID.") from exc
 
 
+def session_id(headers: Mapping[str, str]) -> str | None:
+    """Validate an optional opaque session affinity without forwarding it."""
+
+    candidate = headers.get("x-llm-router-session-id")
+    if candidate is None:
+        return None
+    encoded = candidate.encode("utf-8")
+    if not 1 <= len(encoded) <= 256 or any(
+        ord(character) <= 0x1F or 0x7F <= ord(character) <= 0x9F for character in candidate
+    ):
+        raise invalid_request(
+            "The x-llm-router-session-id header must be 1 to 256 UTF-8 bytes without control characters."
+        )
+    return candidate
+
+
 def safe_headers(headers: Mapping[str, str], extension_headers: tuple[str, ...] = ()) -> dict[str, str]:
     """Return only protocol headers approved for upstream forwarding."""
 

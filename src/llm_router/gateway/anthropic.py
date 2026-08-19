@@ -13,8 +13,14 @@ from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
 from llm_router.domain import Protocol, ProtocolEnvelope
-from llm_router.errors import RouterError, invalid_request
-from llm_router.gateway.auth import authenticate, request_id, safe_headers, task_id
+from llm_router.errors import RouterError, internal_error, invalid_request
+from llm_router.gateway.auth import (
+    authenticate,
+    request_id,
+    safe_headers,
+    session_id,
+    task_id,
+)
 from llm_router.gateway.common import (
     provider_extension_headers,
     read_json_object,
@@ -66,6 +72,7 @@ class AnthropicGateway:
         availability = None
         plan = None
         task = None
+        selected_policy_version = None
         try:
             authenticate(request.headers, runtime.client_key)
             stage = "read_request"
@@ -73,7 +80,7 @@ class AnthropicGateway:
             model = body.get("model", config.routing.default_profile)
             if not isinstance(model, str) or not model:
                 raise invalid_request("The model field must be a configured string.")
-            session_id = request.headers.get("x-llm-router-session-id")
+            session_key = session_id(request.headers)
             task = task_id(request.headers)
             protocol = Protocol.ANTHROPIC_MESSAGES
             extension_headers = provider_extension_headers(config, protocol)
@@ -88,20 +95,29 @@ class AnthropicGateway:
             )
             stage = "route"
             routing_request = extract_routing_request(body, model, count_only=count_only)
-            if hasattr(runtime, "coordinator"):
-                plan = runtime.coordinator.plan(
-                    RoutingInvocation(UUID(rid), UUID(task) if task else None, session_id, envelope.received_at, routing_request)
+            if runtime.coordinator is None:
+                raise internal_error()
+            resolution = runtime.coordinator.resolve(
+                RoutingInvocation(
+                    UUID(rid),
+                    UUID(task) if task else None,
+                    session_key,
+                    envelope.received_at,
+                    routing_request,
                 )
-            else:
-                availability = runtime.health.snapshot(datetime.now(timezone.utc))
-                plan = runtime.kernel.plan(routing_request, availability)
+            )
+            selected_policy_version = resolution.policy_version
+            if resolution.error is not None:
+                raise resolution.error
+            assert resolution.plan is not None
+            plan = resolution.plan
             stage = "execute"
             response = await runtime.engine.execute(envelope, plan)
             stage = "build_response"
             headers = route_headers(envelope, plan, response)
             asyncio.create_task(
                 record_completion(
-                    runtime, envelope, routing_request, plan, response, self._usage, task, session_id
+                    runtime, envelope, routing_request, plan, response, self._usage, task, session_key
                 )
             )
             headers.update(response.headers)
@@ -132,6 +148,7 @@ class AnthropicGateway:
                     error,
                     plan,
                     task,
+                    selected_policy_version,
                 )
             return self._errors.json_error(error, rid)
         except Exception:
@@ -143,4 +160,7 @@ class AnthropicGateway:
                     "stage": stage,
                 },
             )
-            return self._errors.json_error(invalid_request("The request could not be processed."), rid)
+            response_error = internal_error() if stage == "route" else invalid_request(
+                "The request could not be processed."
+            )
+            return self._errors.json_error(response_error, rid)

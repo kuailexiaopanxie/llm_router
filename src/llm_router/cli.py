@@ -11,6 +11,8 @@ from collections import Counter
 from collections.abc import Sequence
 
 from llm_router.config import load_config
+from llm_router.evaluation.canary_report import build_canary_report, print_canary_table
+from llm_router.evaluation.canary_sqlite import SQLiteCanaryReader
 from llm_router.evaluation.codec import CodecError, parse_utc
 from llm_router.evaluation.models import (
     ReplayChange,
@@ -49,6 +51,21 @@ def _shadow_report_parser() -> argparse.ArgumentParser:
     parser.add_argument("--from", dest="start", help="Inclusive RFC3339 UTC start")
     parser.add_argument("--to", dest="end", help="Exclusive RFC3339 UTC end")
     parser.add_argument("--candidate-hash", help="Optional candidate policy SHA-256")
+    parser.add_argument("--format", choices=("table", "json"), default="table")
+    parser.add_argument("--limit", type=int, default=10_000)
+    return parser
+
+
+def _canary_report_parser() -> argparse.ArgumentParser:
+    """Build the read-only actual Canary report parser."""
+
+    parser = argparse.ArgumentParser(
+        prog="llm-router canary-report",
+        description="Report observed controlled Canary routing facts",
+    )
+    parser.add_argument("--db", required=True, help="Path to the router SQLite database")
+    parser.add_argument("--from", dest="start", help="Inclusive RFC3339 UTC start")
+    parser.add_argument("--to", dest="end", help="Exclusive RFC3339 UTC end")
     parser.add_argument("--format", choices=("table", "json"), default="table")
     parser.add_argument("--limit", type=int, default=10_000)
     return parser
@@ -269,6 +286,34 @@ def run_shadow_report(argv: Sequence[str]) -> int:
     return 0
 
 
+def run_canary_report(argv: Sequence[str]) -> int:
+    """Read and aggregate bounded actual Canary observations only."""
+
+    parser = _canary_report_parser()
+    try:
+        args = parser.parse_args(argv)
+        if args.limit < 1 or args.limit > 100_000:
+            parser.error("--limit must be between 1 and 100000")
+        start = parse_utc(args.start) if args.start else None
+        end = parse_utc(args.end) if args.end else None
+        if start is not None and end is not None and start >= end:
+            parser.error("--from must be earlier than --to")
+    except (TypeError, ValueError, CodecError) as exc:
+        print(f"Canary report configuration error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        rows = SQLiteCanaryReader(args.db).rows(start, end, args.limit)
+    except (sqlite3.Error, OSError, CodecError) as exc:
+        print(f"Canary report failed: {exc}", file=sys.stderr)
+        return 3
+    report = build_canary_report(rows)
+    if args.format == "json":
+        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+    else:
+        print_canary_table(report)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Dispatch replay only when it is the first command-line argument."""
 
@@ -277,6 +322,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_replay(arguments[1:])
     if arguments and arguments[0] == "shadow-report":
         return run_shadow_report(arguments[1:])
+    if arguments and arguments[0] == "canary-report":
+        return run_canary_report(arguments[1:])
     from llm_router.app import main as server_main
 
     server_main()

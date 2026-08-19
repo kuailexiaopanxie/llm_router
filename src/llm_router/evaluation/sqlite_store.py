@@ -12,6 +12,10 @@ from uuid import UUID
 
 import aiosqlite
 
+from llm_router.evaluation.canary_codec import (
+    assignment_from_decision_row,
+    encode_canary_assignment,
+)
 from llm_router.evaluation.codec import (
     CodecError,
     decode_availability,
@@ -127,6 +131,13 @@ class SQLiteEvaluationStore:
             await cursor.close()
             if "task_id" not in columns:
                 await connection.execute("ALTER TABLE route_requests ADD COLUMN task_id TEXT")
+        cursor = await connection.execute("PRAGMA table_info(route_decision_inputs)")
+        decision_columns = {row[1] for row in await cursor.fetchall()}
+        await cursor.close()
+        if "canary_assignment_json" not in decision_columns:
+            await connection.execute(
+                "ALTER TABLE route_decision_inputs ADD COLUMN canary_assignment_json TEXT"
+            )
         await connection.commit()
         self._connection = connection
         self._closed = False
@@ -182,8 +193,8 @@ class SQLiteEvaluationStore:
                     (request_id, task_id, recorded_at, schema_version, router_version,
                      routing_algorithm_version, routing_policy_hash, routing_request_json,
                      session_snapshot_json, availability_snapshot_json,
-                     actual_plan_json, actual_error_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     actual_plan_json, actual_error_json, canary_assignment_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(decision.request_id),
@@ -198,6 +209,7 @@ class SQLiteEvaluationStore:
                         encode_availability(decision.availability),
                         encode_plan(decision.actual_plan) if decision.actual_plan else None,
                         encode_error(decision.actual_error) if decision.actual_error else None,
+                        encode_canary_assignment(decision.canary_assignment),
                     ),
                 )
                 await connection.commit()
@@ -409,8 +421,6 @@ class SQLiteReplayStore:
 def _decode_decision(row: dict[str, object]) -> RouteDecisionInput:
     """Decode one versioned decision row into its typed domain model."""
 
-    if row["schema_version"] != 1:
-        raise CodecError("decision schema is incompatible")
     return RouteDecisionInput(
         request_id=UUID(str(row["request_id"])),
         task_id=UUID(str(row["task_id"])) if row["task_id"] else None,
@@ -423,6 +433,8 @@ def _decode_decision(row: dict[str, object]) -> RouteDecisionInput:
         availability=decode_availability(str(row["availability_snapshot_json"])),
         actual_plan=decode_plan(str(row["actual_plan_json"])) if row["actual_plan_json"] else None,
         actual_error=decode_error(str(row["actual_error_json"])) if row["actual_error_json"] else None,
+        canary_assignment=assignment_from_decision_row(row),
+        schema_version=int(str(row["schema_version"])),
     )
 
 

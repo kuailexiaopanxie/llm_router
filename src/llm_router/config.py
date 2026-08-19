@@ -14,6 +14,7 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from llm_router.canary_config import CanaryConfig, CandidatePolicyConfig
 from llm_router.domain import Capability, ExecutionTimeouts, ModelTarget, Protocol, Tier
 
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
@@ -262,6 +263,8 @@ class RouterConfig(StrictModel):
     outcomes: OutcomesConfig = Field(default_factory=OutcomesConfig)
     replay: ReplayConfig = Field(default_factory=ReplayConfig)
     shadow: ShadowConfig = Field(default_factory=ShadowConfig)
+    candidate_policy: CandidatePolicyConfig | None = None
+    canary: CanaryConfig = Field(default_factory=CanaryConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     providers: dict[str, ProviderConfig]
     models: dict[str, ModelConfig]
@@ -287,6 +290,24 @@ class RouterConfig(StrictModel):
         ]
         if unknown_shadow_profiles:
             raise ValueError("shadow.profiles must reference declared profiles")
+        candidate_path = self.candidate_policy.config_path if self.candidate_policy else None
+        shadow_path = self.shadow.candidate_config_path
+        if (
+            candidate_path
+            and shadow_path
+            and Path(candidate_path).expanduser() != Path(shadow_path).expanduser()
+        ):
+            raise ValueError("candidate_policy and shadow candidate paths must match")
+        if (self.shadow.enabled or self.canary.enabled) and not (candidate_path or shadow_path):
+            raise ValueError("enabled shadow or canary requires a candidate policy source")
+        if self.canary.enabled and (
+            self.candidate_policy is None
+            or self.candidate_policy.expected_policy_hash is None
+        ):
+            raise ValueError("enabled canary requires candidate_policy.expected_policy_hash")
+        for segment in self.canary.segments:
+            if segment.profile not in self.profiles:
+                raise ValueError("canary segment profile must reference a declared profile")
         for alias, model in self.models.items():
             if model.provider not in self.providers:
                 raise ValueError(f"model {alias!r} references an unknown provider")
@@ -425,5 +446,7 @@ def load_candidate_config(path: str | Path) -> RouterConfig:
     if not isinstance(raw, dict):
         raise TypeError("candidate configuration must be a YAML mapping")
     candidate = dict(raw)
+    candidate.pop("candidate_policy", None)
     candidate.pop("shadow", None)
+    candidate.pop("canary", None)
     return RouterConfig.model_validate(candidate)

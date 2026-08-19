@@ -19,15 +19,17 @@ from llm_router.telemetry.metrics import RouterMetrics
 class DecisionRecorderPort(Protocol):
     """Accept sanitized decision records without blocking requests."""
 
-    def record(self, decision: RouteDecisionInput) -> None:
-        """Queue one record best-effort."""
+    def record(self, decision: RouteDecisionInput) -> bool:
+        """Queue one record and report bounded admission status."""
 
 
 class NoopDecisionRecorder:
     """Discard decisions when capture is disabled."""
 
-    def record(self, decision: RouteDecisionInput) -> None:
-        """Accept and intentionally discard one decision."""
+    def record(self, decision: RouteDecisionInput) -> bool:
+        """Discard one decision and report that capture is unavailable."""
+
+        return False
 
 
 class DecisionRecorder:
@@ -72,28 +74,30 @@ class DecisionRecorder:
             finally:
                 self._queue.task_done()
 
-    def record(self, decision: RouteDecisionInput) -> None:
-        """Queue one decision or safely drop it at capacity."""
+    def record(self, decision: RouteDecisionInput) -> bool:
+        """Queue one decision or safely report a bounded drop."""
 
         if self._stopping:
-            return
+            return False
         try:
             if decision_size_bytes(decision) > MAX_DECISION_INPUT_BYTES:
                 if self._metrics is not None:
                     self._metrics.decision_capture.labels("dropped").inc()
-                return
+                return False
         except (CodecError, ValueError):
             if self._metrics is not None:
                 self._metrics.decision_capture.labels("failed").inc()
-            return
+            return False
         try:
             self._queue.put_nowait(decision)
             if self._metrics is not None:
                 self._metrics.decision_capture.labels("queued").inc()
+            return True
         except asyncio.QueueFull:
             if self._metrics is not None:
                 self._metrics.decision_capture.labels("dropped").inc()
             self._logger.warning("decision capture queue is full", extra={"event": "decision_capture_dropped"})
+            return False
 
     async def close(self, grace_seconds: float = 5) -> None:
         """Drain queued decisions within a bounded shutdown grace period."""

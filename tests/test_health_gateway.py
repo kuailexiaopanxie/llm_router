@@ -64,14 +64,25 @@ def _runtime(
 
         raise AssertionError("execution must not start when no target is available")
 
+    kernel = RoutingKernel(compile_routing_policy(config))
+    sessions = SimpleNamespace(
+        routing_snapshot=lambda _: None,
+        record=lambda *items: session_calls.append(items),
+    )
     return SimpleNamespace(
         config=config,
         client_key="local-token",
         health=health,
-        kernel=RoutingKernel(compile_routing_policy(config)),
+        kernel=kernel,
         engine=SimpleNamespace(execute=execute),
         telemetry=SimpleNamespace(record=events.append),
-        sessions=SimpleNamespace(record=lambda *items: session_calls.append(items)),
+        sessions=sessions,
+        coordinator=RoutingCoordinator(
+            CurrentPolicySelector(kernel),
+            sessions,
+            health,
+            NoopDecisionRecorder(),
+        ),
     )
 
 
@@ -192,3 +203,6 @@ def test_unknown_provider_exchange_does_not_update_session(router_config: Router
 
     assert len(events) == 2
     assert session_calls == [("session-1", plan.primary.tier, OutcomeSignal.SUCCESS)]
+from llm_router.evaluation.recorder import NoopDecisionRecorder
+from llm_router.routing.canary import CurrentPolicySelector
+from llm_router.routing.coordinator import RoutingCoordinator

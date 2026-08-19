@@ -103,3 +103,8 @@ def not_ready() -> RouterError:
 
     return RouterError("router_not_ready", 503, "The router is not ready.")
 
+
+def internal_error() -> RouterError:
+    """Create a bounded internal error without exposing exception details."""
+
+    return RouterError("router_internal_error", 500, "The request could not be processed.")

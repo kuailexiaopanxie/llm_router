@@ -139,6 +139,7 @@ def record_route_failure(
     error: RouterError,
     plan: Any | None = None,
     task_id: str | None = None,
+    policy_version: str | None = None,
 ) -> None:
     """Record a bounded no-available-target failure without session updates."""
 
@@ -164,7 +165,7 @@ def record_route_failure(
                 primary_model="none",
                 final_model="none",
                 route_reason=health_reason,
-                policy_version=runtime.config.effective_policy_version,
+                policy_version=policy_version or runtime.config.effective_policy_version,
                 status="error",
                 attempt_count=0,
                 total_latency_ms=(datetime.now(timezone.utc) - envelope.received_at).total_seconds()

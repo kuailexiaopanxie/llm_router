@@ -9,6 +9,7 @@ from uuid import UUID
 
 from llm_router.domain import ExecutionPlan, Protocol, RoutingRequest
 from llm_router.errors import RouterError
+from llm_router.evaluation.canary_models import CanaryAssignment
 from llm_router.health.models import AvailabilitySnapshot
 from llm_router.routing.context import SessionSnapshot
 
@@ -116,7 +117,8 @@ class RouteDecisionInput:
     availability: AvailabilitySnapshot
     actual_plan: ExecutionPlan | None = None
     actual_error: RouterErrorSnapshot | None = None
-    schema_version: int = 1
+    canary_assignment: CanaryAssignment | None = None
+    schema_version: int = 2
 
     def __post_init__(self) -> None:
         """Require exactly one normalized actual result."""

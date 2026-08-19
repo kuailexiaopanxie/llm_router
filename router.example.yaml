@@ -31,10 +31,17 @@ replay:
   # 单次 replay 最多读取的历史决策数，不是数据库保留数量。
   max_records: 10000
 
+# v0.6：Shadow 与 Canary 共用的候选路由策略文件。候选文件不会解析密钥或创建 Provider。
+candidate_policy:
+  # 相对路径以本主配置文件所在目录为基准。
+  config_path: ./router-candidate.yaml
+  # 启用 Canary 前，必须替换为已审核候选策略的 64 位小写 SHA-256 policy hash。
+  expected_policy_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
 # v0.5：在线旁路评估候选路由策略，默认关闭且永不影响实际模型请求。
 shadow:
   enabled: false
-  # 候选配置路径；相对路径以本主配置文件所在目录为基准。
+  # v0.5 兼容别名；若与 candidate_policy.config_path 同时配置，二者必须指向同一路径。
   candidate_config_path: ./router-candidate.yaml
   # 进入 Shadow 的确定性采样比例：0.0 不采样，1.0 采样全部符合过滤条件的请求。
   sample_rate: 0.0
@@ -46,6 +53,24 @@ shadow:
   queue_capacity: 256
   # 单条候选路由纯计算的最长时间（毫秒）；超时结果被丢弃。
   evaluation_timeout_ms: 25
+
+# v0.6：把符合条件的真实请求确定性分配给 Current 或 Candidate，默认关闭。
+canary:
+  enabled: false
+  # Candidate 真实流量比例；启用时范围为 0.0001..0.25，最多四位小数。
+  traffic_rate: 0.01
+  # HMAC 分桶 salt 的环境变量名；值至少 32 bytes，禁止写入 YAML。
+  assignment_salt_env: LLM_ROUTER_CANARY_SALT
+  # 只有明确列出的协议/Profile 组合可进入 Canary；启用时至少配置一个。
+  segments:
+    - protocol: anthropic_messages
+      profile: code/auto
+    - protocol: openai_responses
+      profile: code/auto
+  # 每个 segment 在观察窗口内需要的 Shadow evaluated 样本下限。
+  minimum_shadow_evaluated: 100
+  # 启动 Gate 回看的 Shadow 时间窗口，单位秒；Gate 只在启动时计算一次。
+  shadow_gate_lookback_seconds: 86400
 
 # Provider/Target 失败后的本进程健康熔断与恢复探测设置。
 health:

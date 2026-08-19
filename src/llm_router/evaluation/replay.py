@@ -131,7 +131,7 @@ class ReplayEngine:
         """Replay one case or return a bounded non-replayable reason."""
 
         decision = case.decision
-        if decision.schema_version != 1:
+        if decision.schema_version not in {1, 2}:
             return self._non_replayable(case, "replay_schema_incompatible")
         if decision.routing_algorithm_version != self._candidate.routing_algorithm_version:
             return self._non_replayable(case, "replay_algorithm_incompatible")
