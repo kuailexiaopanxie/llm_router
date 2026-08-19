@@ -51,3 +51,31 @@ llm-router replay \
 ```
 
 Replay opens SQLite read-only, does not resolve Provider secrets, and never calls a Provider. It reports how candidate execution plans differ; historical Outcome data is not assigned to hypothetical targets and cannot establish candidate quality, success rate, cost, or latency.
+
+## Online Shadow Policy
+
+Shadow evaluation is disabled by default. Enable it with one fixed local candidate file:
+
+```yaml
+shadow:
+  enabled: true
+  candidate_config_path: ./router-candidate.yaml
+  sample_rate: 0.10
+  protocols: []
+  profiles: []
+  queue_capacity: 256
+  evaluation_timeout_ms: 25
+```
+
+The candidate is compiled at startup without resolving its API keys or creating a Provider. Shadow evaluation is sampled, asynchronous, bounded, and fail-open; it never changes the actual model request. It compares only routing plans and normalized errors.
+
+Inspect persisted comparisons without loading configuration or secrets:
+
+```bash
+llm-router shadow-report \
+  --db ~/.llm-router/router.db \
+  --format table \
+  --limit 10000
+```
+
+The report describes structural changes and actual Outcome coverage only. It does not estimate candidate success rate, quality, cost, latency, or expected answers. Set `shadow.enabled: false` and restart to roll back shadow admission; retained shadow records remain readable.

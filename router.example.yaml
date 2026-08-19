@@ -1,52 +1,95 @@
+# 配置文件格式版本，当前仅支持 1。
 version: 1
 
+# 本地 Router HTTP 服务配置。
 server:
+  # 默认仅监听本机，避免未经授权的远程访问。
   host: 127.0.0.1
   port: 8848
+  # 本地客户端认证 Token 的环境变量名，不要将 Token 写入 YAML。
   client_api_key_env: LLM_ROUTER_CLIENT_API_KEY
+  # 单个模型请求体的最大字节数，16 MiB。
   max_request_bytes: 16777216
 
+# 本地持久化：路由遥测、Outcome、Replay 与 Shadow 数据共用此 SQLite 文件。
 storage:
   sqlite_path: ~/.llm-router/router.db
 
+# v0.4：接收调用方提交的真实任务结果，不会实时改变路由或健康状态。
 outcomes:
   enabled: true
+  # 单个 Outcome 请求体上限，16 KiB。
   max_request_bytes: 16384
+  # observed_at 最多允许追溯 7 天。
   max_event_age_seconds: 604800
+  # observed_at 最多允许领先服务器时间 5 分钟。
   max_future_skew_seconds: 300
 
+# v0.4：异步记录脱敏的路由决策，供离线 replay 命令使用。
 replay:
   capture_enabled: true
+  # 单次 replay 最多读取的历史决策数，不是数据库保留数量。
   max_records: 10000
 
+# v0.5：在线旁路评估候选路由策略，默认关闭且永不影响实际模型请求。
+shadow:
+  enabled: false
+  # 候选配置路径；相对路径以本主配置文件所在目录为基准。
+  candidate_config_path: ./router-candidate.yaml
+  # 进入 Shadow 的确定性采样比例：0.0 不采样，1.0 采样全部符合过滤条件的请求。
+  sample_rate: 0.0
+  # 空数组表示全部协议；可选 anthropic_messages、openai_responses。
+  protocols: []
+  # 空数组表示全部 Profile；非空时只评估指定 Profile。
+  profiles: []
+  # 异步 Shadow 队列容量；满时丢弃最新 Shadow 任务，不阻塞实际请求。
+  queue_capacity: 256
+  # 单条候选路由纯计算的最长时间（毫秒）；超时结果被丢弃。
+  evaluation_timeout_ms: 25
+
+# Provider/Target 失败后的本进程健康熔断与恢复探测设置。
 health:
   enabled: true
+  # 在 failure_window_seconds 内达到此失败次数后，目标或 Provider 进入 cooldown。
   failure_threshold: 2
   failure_window_seconds: 120
+  # 初始冷却时间（秒）。
   cooldown_seconds: 30
+  # 指数退避后的冷却时间上限（秒）。
   max_cooldown_seconds: 300
   backoff_multiplier: 2.0
 
+# 上游 Provider 连接配置。api_key_env 指向环境变量，密钥不写入文件。
 providers:
   anthropic:
     type: anthropic
+    # 可替换为兼容 Anthropic Messages 协议的上游地址，例如 Kimi 的 Anthropic 兼容入口。
     base_url: https://api.anthropic.com
     api_key_env: LLM_ROUTER_ANTHROPIC_API_KEY
+    # Anthropic Messages 使用 x-api-key 认证。
     auth_scheme: x_api_key
+    # 此 Provider 的最大并发上游请求数。
     max_concurrency: 16
   openai:
     type: openai
     base_url: https://api.openai.com
     api_key_env: LLM_ROUTER_OPENAI_API_KEY
+    # OpenAI Responses 使用 Authorization: Bearer 认证。
     auth_scheme: bearer
     max_concurrency: 16
 
+# Router 内部模型别名到上游模型的映射。
+# 必须将 configured-... 替换为上游实际支持的模型名称。
 models:
   anthropic_fast:
+    # 引用 providers 中的 Provider 名称。
     provider: anthropic
     upstream_model: configured-fast-model
+    # fast / balanced / deep 用于 code/auto 的确定性选型。
     tier: fast
+    # 仅声明上游模型实际支持的能力，Router 据此过滤目标。
     capabilities: [streaming, tools, prompt_cache]
+    # 上游模型可接受的最大输入 token 数。
     max_input_tokens: 200000
   anthropic_balanced:
     provider: anthropic
@@ -63,7 +106,9 @@ models:
   openai_fast:
     provider: openai
     upstream_model: configured-openai-fast-model
+    # OpenAI Responses 路由必须明确此协议。
     protocol: openai_responses
+    # 请求需要状态连续性时，只允许同一 state_scope 内 fallback。
     state_scope: openai-default
     tier: fast
     capabilities: [streaming, tools, reasoning, vision, structured_output]
@@ -85,10 +130,13 @@ models:
     capabilities: [streaming, tools, reasoning, vision, structured_output, response_state, provider_managed_tools]
     max_input_tokens: 200000
 
+# 客户端 model 参数使用的路由 Profile。
 profiles:
   code/auto:
+    # 根据请求能力、输入长度、工具轮次和失败信号选择 tier。
     mode: auto
   code/fast:
+    # 显式 Profile 按入站协议分别指定主模型与 fallback 顺序。
     targets:
       anthropic_messages:
         primary: anthropic_fast
@@ -114,17 +162,30 @@ profiles:
         fallback: []
 
 routing:
+  # 未指定 model/Profile 时使用的默认策略。
   default_profile: code/auto
+  # 路由策略版本；影响 policy snapshot 与 Replay/Shadow 审计身份。
   policy_version: v3
+  # 会话路由状态的最长保留时间（秒）。
   session_ttl_seconds: 7200
+  # 连续失败达到此次数时，code/auto 升级至 deep tier。
   failure_escalation_requests: 2
+  # 输入 token 不超过此阈值时，简单请求优先选 fast tier。
   fast_max_input_tokens: 8000
+  # 输入 token 超过此阈值时，自动升级至 deep tier。
   balanced_max_input_tokens: 64000
+  # 工具调用轮次达到此阈值时，自动升级至 deep tier。
   deep_tool_rounds_threshold: 3
 
+# 执行阶段的网络和请求时限，单位均为秒。
 timeouts:
+  # 建立到上游连接的最长时间。
   connect_seconds: 5
+  # 等待上游首个响应头的最长时间。
   response_header_seconds: 30
+  # 非流式请求的总时限。
   non_stream_deadline_seconds: 120
+  # 流式响应相邻事件之间允许的最大空闲时间。
   stream_idle_seconds: 90
+  # 流式响应的总时限。
   stream_max_seconds: 1800

@@ -105,6 +105,40 @@ class RouterMetrics:
             ["status"],
             registry=self.registry,
         )
+        self.shadow_admission = Counter(
+            "llm_router_shadow_admission_total",
+            "Shadow admission outcomes",
+            ["status"],
+            registry=self.registry,
+        )
+        self.shadow_evaluation = Counter(
+            "llm_router_shadow_evaluation_total",
+            "Shadow evaluation outcomes",
+            ["status"],
+            registry=self.registry,
+        )
+        self.shadow_change = Counter(
+            "llm_router_shadow_change_total",
+            "Shadow structural changes",
+            ["change"],
+            registry=self.registry,
+        )
+        self.shadow_persistence = Counter(
+            "llm_router_shadow_persistence_total",
+            "Shadow persistence outcomes",
+            ["status"],
+            registry=self.registry,
+        )
+        self.shadow_queue_depth = Gauge(
+            "llm_router_shadow_queue_depth",
+            "Current shadow queue depth",
+            registry=self.registry,
+        )
+        self.shadow_evaluation_duration = Histogram(
+            "llm_router_shadow_evaluation_duration_seconds",
+            "Shadow evaluation duration",
+            registry=self.registry,
+        )
         self._targets_by_provider: dict[str, tuple[tuple[str, str], ...]] = {}
 
     def initialize_health(self, targets: Mapping[str, ModelTarget]) -> None:

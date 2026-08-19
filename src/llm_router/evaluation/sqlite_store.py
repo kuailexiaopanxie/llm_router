@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 import aiosqlite
@@ -37,8 +38,19 @@ from llm_router.evaluation.models import (
     ReplayCase,
     RouteDecisionInput,
     RoutingPolicySnapshot,
+    ShadowDecision,
 )
-from llm_router.evaluation.port import EvaluationStoreError, OutcomeConflictError
+from llm_router.evaluation.port import (
+    EvaluationStoreError,
+    OutcomeConflictError,
+    ShadowIntegrityError,
+)
+from llm_router.evaluation.shadow_codec import validate_shadow_size
+from llm_router.evaluation.shadow_sqlite import (
+    SHADOW_SCHEMA,
+    SQLiteShadowReader,
+    shadow_values,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS outcome_events (
@@ -103,7 +115,7 @@ class SQLiteEvaluationStore:
         await connection.execute("PRAGMA journal_mode=WAL")
         await connection.execute("PRAGMA synchronous=NORMAL")
         await connection.execute("PRAGMA busy_timeout=2000")
-        await connection.executescript(_SCHEMA)
+        await connection.executescript(_SCHEMA + SHADOW_SCHEMA)
         cursor = await connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='route_requests'"
         )
@@ -280,6 +292,70 @@ class SQLiteEvaluationStore:
             except (aiosqlite.Error, CodecError) as exc:
                 await connection.rollback()
                 raise EvaluationStoreError("outcome event could not be persisted") from exc
+
+    async def append_shadow(self, decision: ShadowDecision) -> Literal["written", "duplicate"]:
+        """Insert one immutable shadow result with policy and payload checks."""
+
+        connection = self._require_connection()
+        validate_shadow_size(decision)
+        values = shadow_values(decision)
+        async with self._lock:
+            try:
+                await connection.execute("BEGIN IMMEDIATE")
+                policy_cursor = await connection.execute(
+                    "SELECT COUNT(*) FROM routing_policy_snapshots WHERE routing_policy_hash IN (?, ?)",
+                    (decision.actual_policy_hash, decision.candidate_policy_hash),
+                )
+                policy_row = await policy_cursor.fetchone()
+                policy_count = int(policy_row[0]) if policy_row is not None else 0
+                await policy_cursor.close()
+                if policy_count != (1 if decision.actual_policy_hash == decision.candidate_policy_hash else 2):
+                    await connection.rollback()
+                    raise ShadowIntegrityError("shadow policy snapshot is missing")
+                cursor = await connection.execute(
+                    "SELECT payload_hash FROM shadow_decisions WHERE request_id = ? AND candidate_policy_hash = ?",
+                    (str(decision.request_id), decision.candidate_policy_hash),
+                )
+                existing = await cursor.fetchone()
+                await cursor.close()
+                if existing is not None:
+                    if existing[0] != values[-1]:
+                        await connection.rollback()
+                        raise ShadowIntegrityError("shadow decision key conflicts with existing payload")
+                    await connection.rollback()
+                    return "duplicate"
+                await connection.execute(
+                    """
+                    INSERT INTO shadow_decisions
+                    (request_id, candidate_policy_hash, recorded_at, evaluated_at, protocol,
+                     requested_profile, actual_policy_hash, candidate_algorithm_version,
+                     schema_version, status, change, reason, actual_plan_json, actual_error_json,
+                     candidate_plan_json, candidate_error_json, payload_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+                await connection.commit()
+                return "written"
+            except (ShadowIntegrityError, aiosqlite.IntegrityError):
+                await connection.rollback()
+                raise
+            except (aiosqlite.Error, CodecError) as exc:
+                await connection.rollback()
+                raise EvaluationStoreError("shadow decision could not be persisted") from exc
+
+    def iter_shadow(
+        self,
+        start: datetime | None,
+        end: datetime | None,
+        candidate_policy_hash: str | None,
+        limit: int,
+    ) -> Iterator[ShadowDecision]:
+        """Yield shadow decisions through the read-only adapter."""
+
+        yield from SQLiteShadowReader(str(self._path)).iter_shadow(
+            start, end, candidate_policy_hash, limit
+        )
 
     async def close(self) -> None:
         """Stop acknowledging writes and close the SQLite connection."""

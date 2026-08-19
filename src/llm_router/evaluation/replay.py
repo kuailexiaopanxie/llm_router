@@ -115,6 +115,18 @@ class ReplayEngine:
         self._mode = ReplayMode(mode)
         self._kernel = RoutingKernel(candidate_policy)
 
+    @property
+    def candidate_policy(self) -> RoutingPolicy:
+        """Return the immutable candidate policy used by this engine."""
+
+        return self._candidate
+
+    @property
+    def candidate_policy_hash(self) -> str:
+        """Return the candidate policy hash used for sampling and storage."""
+
+        return self._candidate.routing_policy_hash
+
     def replay(self, case: ReplayCase) -> ReplayResult:
         """Replay one case or return a bounded non-replayable reason."""
 

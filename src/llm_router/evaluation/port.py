@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 from llm_router.evaluation.models import (
     OutcomeEvent,
@@ -12,6 +12,7 @@ from llm_router.evaluation.models import (
     ReplayCase,
     RouteDecisionInput,
     RoutingPolicySnapshot,
+    ShadowDecision,
 )
 
 
@@ -21,6 +22,10 @@ class EvaluationStoreError(RuntimeError):
 
 class OutcomeConflictError(EvaluationStoreError):
     """Report a reused event ID with different semantic content."""
+
+
+class ShadowIntegrityError(EvaluationStoreError):
+    """Report conflicting content for one immutable shadow key."""
 
 
 class DecisionStorePort(Protocol):
@@ -47,3 +52,19 @@ class ReplayStorePort(Protocol):
         self, start: datetime | None, end: datetime | None, limit: int
     ) -> Iterator[ReplayCase]:
         """Yield replay cases in stable time and request order."""
+
+
+class ShadowStorePort(Protocol):
+    """Persist and read bounded shadow comparisons."""
+
+    async def append_shadow(self, decision: ShadowDecision) -> Literal["written", "duplicate"]:
+        """Insert or identify one immutable shadow comparison."""
+
+    def iter_shadow(
+        self,
+        start: datetime | None,
+        end: datetime | None,
+        candidate_policy_hash: str | None,
+        limit: int,
+    ) -> Iterator[ShadowDecision]:
+        """Yield shadow decisions in stable recorded-time order."""

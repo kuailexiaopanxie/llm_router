@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ from llm_router.domain import ExecutionPlan, RoutingRequest
 from llm_router.errors import RouterError
 from llm_router.evaluation.models import RouteDecisionInput, RouterErrorSnapshot
 from llm_router.evaluation.recorder import DecisionRecorderPort
+from llm_router.evaluation.shadow import NoopShadowEvaluator, ShadowEvaluatorPort
 from llm_router.health.port import HealthPort
 from llm_router.routing.context import RoutingContext
 from llm_router.routing.kernel import RoutingKernel
@@ -38,6 +40,7 @@ class RoutingCoordinator:
         sessions: SessionStateStore,
         health: HealthPort,
         recorder: DecisionRecorderPort,
+        shadow: ShadowEvaluatorPort | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         """Bind online runtime ports without taking execution ownership."""
@@ -46,6 +49,7 @@ class RoutingCoordinator:
         self._sessions = sessions
         self._health = health
         self._recorder = recorder
+        self._shadow = shadow or NoopShadowEvaluator()
         self._clock = clock
 
     def plan(self, invocation: RoutingInvocation) -> ExecutionPlan:
@@ -75,18 +79,24 @@ class RoutingCoordinator:
         """Construct one bounded record and delegate best-effort delivery."""
 
         policy = self._kernel.policy
-        self._recorder.record(
-            RouteDecisionInput(
-                request_id=invocation.request_id,
-                task_id=invocation.task_id,
-                recorded_at=recorded_at,
-                router_version=__version__,
-                routing_algorithm_version=policy.routing_algorithm_version,
-                routing_policy_hash=policy.routing_policy_hash,
-                request=invocation.request,
-                session=context.session,
-                availability=context.availability,
-                actual_plan=plan,
-                actual_error=error,
-            )
+        decision = RouteDecisionInput(
+            request_id=invocation.request_id,
+            task_id=invocation.task_id,
+            recorded_at=recorded_at,
+            router_version=__version__,
+            routing_algorithm_version=policy.routing_algorithm_version,
+            routing_policy_hash=policy.routing_policy_hash,
+            request=invocation.request,
+            session=context.session,
+            availability=context.availability,
+            actual_plan=plan,
+            actual_error=error,
         )
+        self._recorder.record(decision)
+        try:
+            self._shadow.submit(decision)
+        except Exception:
+            logging.getLogger("llm_router.routing").exception(
+                "shadow submission failed",
+                extra={"event": "shadow_submission_failed", "request_id": str(decision.request_id)},
+            )

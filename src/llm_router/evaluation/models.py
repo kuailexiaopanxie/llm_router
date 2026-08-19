@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from llm_router.domain import ExecutionPlan, RoutingRequest
+from llm_router.domain import ExecutionPlan, Protocol, RoutingRequest
 from llm_router.errors import RouterError
 from llm_router.health.models import AvailabilitySnapshot
 from llm_router.routing.context import SessionSnapshot
@@ -169,6 +169,61 @@ class ReplayChange(StrEnum):
     ERROR_CHANGED = "error_changed"
     PLAN_TO_ERROR = "plan_to_error"
     ERROR_TO_PLAN = "error_to_plan"
+
+
+class ShadowStatus(StrEnum):
+    """Bounded result of one admitted shadow evaluation."""
+
+    EVALUATED = "evaluated"
+    NON_REPLAYABLE = "non_replayable"
+    EVALUATION_FAILED = "evaluation_failed"
+
+
+class ShadowReason(StrEnum):
+    """Bounded reasons for shadow results without candidate output."""
+
+    AVAILABILITY_IDENTITY_MISSING = "availability_identity_missing"
+    ALGORITHM_INCOMPATIBLE = "shadow_algorithm_incompatible"
+    SCHEMA_INCOMPATIBLE = "shadow_schema_incompatible"
+    CONTEXT_INVALID = "shadow_context_invalid"
+    POLICY_MISSING = "shadow_policy_missing"
+    POLICY_INVALID = "shadow_policy_invalid"
+    HISTORICAL_REPRODUCTION_MISMATCH = "historical_reproduction_mismatch"
+    EVALUATION_EXCEPTION = "shadow_evaluation_exception"
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowDecision:
+    """Persist one safe structural comparison for an actual request."""
+
+    request_id: UUID
+    recorded_at: datetime
+    evaluated_at: datetime
+    protocol: Protocol
+    requested_profile: str
+    actual_policy_hash: str
+    candidate_policy_hash: str
+    candidate_algorithm_version: str
+    actual_plan: ExecutionPlan | None
+    actual_error: RouterErrorSnapshot | None
+    candidate_plan: ExecutionPlan | None
+    candidate_error: RouterErrorSnapshot | None
+    status: ShadowStatus
+    change: ReplayChange | None = None
+    reason: ShadowReason | None = None
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        """Enforce actual and candidate exactly-one invariants."""
+
+        if (self.actual_plan is None) == (self.actual_error is None):
+            raise ValueError("a shadow decision must contain exactly one actual result")
+        candidate_exactly_one = (self.candidate_plan is None) != (self.candidate_error is None)
+        if self.status is ShadowStatus.EVALUATED:
+            if not candidate_exactly_one or self.change is None or self.reason is not None:
+                raise ValueError("an evaluated shadow decision requires one candidate result and change")
+        elif candidate_exactly_one or self.change is not None or self.reason is None:
+            raise ValueError("a non-evaluated shadow decision requires only a bounded reason")
 
 
 @dataclass(frozen=True, slots=True)

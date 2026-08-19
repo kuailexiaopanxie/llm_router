@@ -10,16 +10,25 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from llm_router.config import RouterConfig, load_config
+from llm_router.config import RouterConfig, load_candidate_config, load_config
 from llm_router.domain import ModelTarget, Protocol
 from llm_router.errors import not_ready
 from llm_router.evaluation.codec import make_policy_snapshot
+from llm_router.evaluation.models import RoutingPolicySnapshot
 from llm_router.evaluation.outcomes import OutcomeService
 from llm_router.evaluation.recorder import DecisionRecorder, NoopDecisionRecorder
+from llm_router.evaluation.replay import ReplayEngine
+from llm_router.evaluation.shadow import (
+    NoopShadowEvaluator,
+    ShadowEvaluator,
+    ShadowEvaluatorPort,
+    UnavailableShadowEvaluator,
+)
 from llm_router.evaluation.sqlite_store import SQLiteEvaluationStore
 from llm_router.execution.engine import ExecutionEngine
 from llm_router.execution.stream_semantics import (
@@ -99,7 +108,48 @@ class Runtime:
     coordinator: RoutingCoordinator
     evaluation: SQLiteEvaluationStore | None
     decision_recorder: DecisionRecorder | None
+    shadow_evaluator: ShadowEvaluator | None
+    candidate_policy_snapshot: RoutingPolicySnapshot | None
     ready: bool = False
+
+
+def _shadow_candidate(
+    config: RouterConfig,
+    config_path: str,
+    current_snapshot: RoutingPolicySnapshot,
+    store: SQLiteEvaluationStore,
+    metrics: RouterMetrics,
+) -> tuple[ShadowEvaluatorPort, ShadowEvaluator | None, RoutingPolicySnapshot | None]:
+    """Compile one fixed candidate without resolving its credentials."""
+
+    if not config.shadow.enabled:
+        return NoopShadowEvaluator(metrics), None, None
+    logger = logging.getLogger("llm_router.evaluation.shadow")
+    try:
+        assert config.shadow.candidate_config_path is not None
+        candidate_path = Path(config.shadow.candidate_config_path)
+        if not candidate_path.is_absolute():
+            candidate_path = Path(config_path).expanduser().parent / candidate_path
+        candidate_config = load_candidate_config(candidate_path)
+        candidate_policy = compile_routing_policy(candidate_config)
+        candidate_snapshot = make_policy_snapshot(candidate_config, datetime.now(timezone.utc))
+        if candidate_policy.routing_algorithm_version != current_snapshot.routing_algorithm_version:
+            raise ValueError("candidate routing algorithm is incompatible")
+        evaluator = ShadowEvaluator(
+            ReplayEngine(candidate_policy, "historical"),
+            current_snapshot,
+            store,
+            config.shadow.sample_rate,
+            frozenset(protocol.value for protocol in config.shadow.protocols),
+            frozenset(config.shadow.profiles),
+            config.shadow.queue_capacity,
+            config.shadow.evaluation_timeout_ms,
+            metrics=metrics,
+        )
+        return evaluator, evaluator, candidate_snapshot
+    except Exception:
+        logger.exception("shadow candidate is unavailable", extra={"event": "shadow_candidate_invalid"})
+        return UnavailableShadowEvaluator(metrics), None, None
 
 
 def _health_observer(
@@ -176,9 +226,11 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
     telemetry = TelemetryRecorder(
         SQLiteEventStore(config.storage.sqlite_path), metrics, config.storage.queue_capacity
     )
+    policy = compile_routing_policy(config)
+    current_policy_snapshot = make_policy_snapshot(config, datetime.now(timezone.utc))
     evaluation = (
         SQLiteEvaluationStore(config.storage.sqlite_path)
-        if config.outcomes.enabled or config.replay.capture_enabled
+        if config.outcomes.enabled or config.replay.capture_enabled or config.shadow.enabled
         else None
     )
     decision_recorder = (
@@ -187,9 +239,19 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
         else None
     )
     recorder = decision_recorder or NoopDecisionRecorder()
-    policy = compile_routing_policy(config)
     kernel = RoutingKernel(policy)
-    coordinator = RoutingCoordinator(kernel, sessions, health, recorder)
+    shadow_port: ShadowEvaluatorPort = NoopShadowEvaluator(metrics)
+    shadow_evaluator: ShadowEvaluator | None = None
+    candidate_policy_snapshot: RoutingPolicySnapshot | None = None
+    if evaluation is not None:
+        shadow_port, shadow_evaluator, candidate_policy_snapshot = _shadow_candidate(
+            config,
+            config_path,
+            current_policy_snapshot,
+            evaluation,
+            metrics,
+        )
+    coordinator = RoutingCoordinator(kernel, sessions, health, recorder, shadow_port)
     runtime = Runtime(
         config=config,
         client_key=client_key,
@@ -211,6 +273,8 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
         coordinator=coordinator,
         evaluation=evaluation,
         decision_recorder=decision_recorder,
+        shadow_evaluator=shadow_evaluator,
+        candidate_policy_snapshot=candidate_policy_snapshot,
     )
     anthropic_gateway = AnthropicGateway(runtime)
     openai_gateway = OpenAIResponsesGateway(runtime)
@@ -222,14 +286,21 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
         await runtime.telemetry.start()
         if runtime.evaluation is not None:
             await runtime.evaluation.start()
+            if runtime.decision_recorder is not None or runtime.shadow_evaluator is not None:
+                await runtime.evaluation.ensure_policy(current_policy_snapshot)
+            if runtime.candidate_policy_snapshot is not None:
+                await runtime.evaluation.ensure_policy(runtime.candidate_policy_snapshot)
         if runtime.decision_recorder is not None and runtime.evaluation is not None:
-            await runtime.evaluation.ensure_policy(make_policy_snapshot(config, datetime.now(timezone.utc)))
             await runtime.decision_recorder.start()
+        if runtime.shadow_evaluator is not None:
+            await runtime.shadow_evaluator.start()
         runtime.ready = True
         try:
             yield
         finally:
             runtime.ready = False
+            if runtime.shadow_evaluator is not None:
+                await runtime.shadow_evaluator.close()
             if runtime.decision_recorder is not None:
                 await runtime.decision_recorder.close()
             if runtime.evaluation is not None:
@@ -237,7 +308,7 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
             await runtime.telemetry.close()
             await runtime.providers.close()
 
-    app = FastAPI(title="Coding LLM Router", version="0.4.0", lifespan=lifespan)
+    app = FastAPI(title="Coding LLM Router", version="0.5.0", lifespan=lifespan)
     app.state.runtime = runtime
     if config.outcomes.enabled and evaluation is not None:
         register_outcome_route(
@@ -289,7 +360,7 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
     async def metrics_endpoint() -> Response:
         """Expose local Prometheus metrics."""
 
-        return Response(content=runtime.metrics.render(), media_type="text/plain; version=0.0.4")
+        return Response(content=runtime.metrics.render(), media_type="text/plain; version=0.5.0")
 
     return app
 

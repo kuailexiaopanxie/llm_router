@@ -5,7 +5,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="coding-llm-router",
-    version="0.4.0",
+    version="0.5.0",
     description="Local-first deterministic router for Anthropic Messages and OpenAI Responses",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",

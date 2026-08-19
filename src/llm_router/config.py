@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import re
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -67,6 +68,40 @@ class ReplayConfig(StrictModel):
 
     capture_enabled: bool = True
     max_records: int = Field(default=10_000, ge=1, le=100_000)
+
+
+class ShadowConfig(StrictModel):
+    """Bound online shadow policy evaluation settings."""
+
+    enabled: bool = False
+    candidate_config_path: str | None = None
+    sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    protocols: tuple[Protocol, ...] = ()
+    profiles: tuple[str, ...] = ()
+    queue_capacity: int = Field(default=256, ge=1, le=10_000)
+    evaluation_timeout_ms: int = Field(default=25, ge=1, le=1_000)
+
+    @model_validator(mode="after")
+    def validate_shadow(self) -> ShadowConfig:
+        """Reject unsafe paths, invalid profiles, and over-precise rates."""
+
+        exponent = Decimal(str(self.sample_rate)).as_tuple().exponent
+        if isinstance(exponent, int) and exponent < -4:
+            raise ValueError("shadow.sample_rate supports at most four decimal places")
+        path = self.candidate_config_path
+        if self.enabled and (path is None or not path.strip()):
+            raise ValueError("shadow.candidate_config_path is required when shadow is enabled")
+        if path is not None:
+            if path != path.strip() or any(
+                token in path for token in ("://", "$", "`", ";", "&&", "||", "|", "\n", "\r", "\0")
+            ):
+                raise ValueError("shadow.candidate_config_path must be a local file path")
+            if path.startswith((">", "<")):
+                raise ValueError("shadow.candidate_config_path must be a local file path")
+        alias_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+        if any(not alias_pattern.fullmatch(profile) for profile in self.profiles):
+            raise ValueError("shadow.profiles contains an invalid profile name")
+        return self
 
 
 class HealthConfig(StrictModel):
@@ -226,6 +261,7 @@ class RouterConfig(StrictModel):
     storage: StorageConfig
     outcomes: OutcomesConfig = Field(default_factory=OutcomesConfig)
     replay: ReplayConfig = Field(default_factory=ReplayConfig)
+    shadow: ShadowConfig = Field(default_factory=ShadowConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     providers: dict[str, ProviderConfig]
     models: dict[str, ModelConfig]
@@ -246,6 +282,11 @@ class RouterConfig(StrictModel):
             raise ValueError(f"invalid profile name: {invalid_profiles[0]!r}")
         if self.routing.default_profile not in self.profiles:
             raise ValueError("routing.default_profile must reference a declared profile")
+        unknown_shadow_profiles = [
+            profile for profile in self.shadow.profiles if profile not in self.profiles
+        ]
+        if unknown_shadow_profiles:
+            raise ValueError("shadow.profiles must reference declared profiles")
         for alias, model in self.models.items():
             if model.provider not in self.providers:
                 raise ValueError(f"model {alias!r} references an unknown provider")
@@ -373,3 +414,16 @@ def load_config(path: str | Path) -> RouterConfig:
     if not isinstance(raw, dict):
         raise TypeError("router configuration must be a YAML mapping")
     return RouterConfig.model_validate(raw)
+
+
+def load_candidate_config(path: str | Path) -> RouterConfig:
+    """Load a candidate policy while explicitly ignoring recursive shadow config."""
+
+    config_path = Path(path).expanduser()
+    with config_path.open("r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle)
+    if not isinstance(raw, dict):
+        raise TypeError("candidate configuration must be a YAML mapping")
+    candidate = dict(raw)
+    candidate.pop("shadow", None)
+    return RouterConfig.model_validate(candidate)
