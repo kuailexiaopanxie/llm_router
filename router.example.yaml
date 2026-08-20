@@ -17,6 +17,22 @@ storage:
   # v0.6 兼容配置；必须与 observability.queue_capacity 一致。
   queue_capacity: 2048
 
+# v0.8：本地只读 Observability Dashboard，默认关闭。
+# 启用后仅增加 /admin GET/HEAD，不改变模型端点、路由或 Observation 写入语义。
+dashboard:
+  # 默认 false；开启后可访问 http://127.0.0.1:8848/admin。
+  enabled: false
+  # loopback 可显式设为 false 免输 Token；远程监听时必须为 true。
+  require_auth: true
+  # Overview 默认显示最近小时数（1..168）。
+  default_range_hours: 24
+  # 允许查询的最大历史范围（1..365 天），不会创建额外历史存储。
+  max_range_days: 90
+  # 浏览器 Overview 自动刷新间隔（5..300 秒）；隐藏标签页会暂停。
+  refresh_seconds: 15
+  # 单次 SQLite 只读查询 deadline（100..10000 毫秒）。
+  query_timeout_ms: 2000
+
 # v0.7：统一记录每个模型请求的终态、usage、已知成本和本地 Trace。
 observability:
   # 是否异步持久化 Observation bundle；关闭不影响实时 Metrics。

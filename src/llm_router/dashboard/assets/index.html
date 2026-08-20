@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LLM Router Overview</title>
+  <link rel="stylesheet" href="/admin/assets/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/admin">LLM Router</a>
+    <nav aria-label="Dashboard views">
+      <a data-nav="overview" href="/admin">Overview</a>
+      <a data-nav="requests" href="/admin?view=requests">Requests</a>
+    </nav>
+    <div id="live-state" class="live-state" aria-live="polite">Connecting</div>
+  </header>
+  <form id="filters" class="filters" aria-label="Observation filters">
+    <label>Range
+      <select name="preset">
+        <option value="1">1h</option><option value="6">6h</option>
+        <option value="24" selected>24h</option><option value="168">7d</option><option value="720">30d</option>
+      </select>
+    </label>
+    <label>Status <select name="status"><option value="">All</option><option>success</option><option>error</option><option>cancelled</option><option>abandoned</option></select></label>
+    <label>Profile <input name="profile" maxlength="128" autocomplete="off"></label>
+    <label>Model <input name="model" maxlength="128" autocomplete="off"></label>
+    <label>Provider <input name="provider" maxlength="128" autocomplete="off"></label>
+    <button type="submit">Apply</button>
+    <button id="refresh" class="icon-button" type="button" title="Refresh" aria-label="Refresh"><img src="/admin/assets/icons/refresh-cw.svg" alt=""></button>
+  </form>
+  <main id="app" tabindex="-1"><div class="loading">Loading dashboard</div></main>
+  <dialog id="unlock">
+    <form method="dialog" id="unlock-form">
+      <h2>Dashboard locked</h2>
+      <label>Client key <input name="token" type="password" required autocomplete="off"></label>
+      <p id="unlock-error" class="error" aria-live="polite"></p>
+      <button value="unlock">Unlock</button>
+    </form>
+  </dialog>
+  <div id="announcer" class="sr-only" aria-live="polite"></div>
+  <noscript>This dashboard requires local JavaScript modules.</noscript>
+  <script type="module" src="/admin/assets/app.js"></script>
+</body>
+</html>

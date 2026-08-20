@@ -15,6 +15,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from llm_router.canary_config import CanaryConfig, CandidatePolicyConfig
+from llm_router.dashboard.config import DashboardConfig
 from llm_router.domain import Capability, ExecutionTimeouts, ModelTarget, Protocol, Tier
 from llm_router.observability.config import ObservabilityConfig, PricingConfig
 
@@ -274,6 +275,7 @@ class RouterConfig(StrictModel):
     candidate_policy: CandidatePolicyConfig | None = None
     canary: CanaryConfig = Field(default_factory=CanaryConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     providers: dict[str, ProviderConfig]
     models: dict[str, ModelConfig]
@@ -310,6 +312,8 @@ class RouterConfig(StrictModel):
             listener_loopback = self.server.host == "localhost"
         if not listener_loopback and not self.observability.metrics.require_auth:
             raise ValueError("remote metrics exposure requires metrics.require_auth=true")
+        if not listener_loopback and self.dashboard.enabled and not self.dashboard.require_auth:
+            raise ValueError("remote dashboard exposure requires dashboard.require_auth=true")
         invalid_aliases = [alias for alias in self.models if not alias_pattern.fullmatch(alias)]
         if invalid_aliases:
             raise ValueError(f"invalid model alias: {invalid_aliases[0]!r}")
@@ -400,7 +404,9 @@ class RouterConfig(StrictModel):
     def config_hash(self) -> str:
         """Return a stable hash of the effective non-secret configuration."""
 
-        canonical = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        effective = self.model_dump(mode="json")
+        effective.pop("dashboard", None)
+        canonical = json.dumps(effective, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode()).hexdigest()[:12]
 
     @property

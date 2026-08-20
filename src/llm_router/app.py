@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from llm_router.config import RouterConfig, load_config
+from llm_router.dashboard.bootstrap import DashboardComponents, bootstrap_dashboard
 from llm_router.domain import ModelTarget, Protocol
 from llm_router.errors import RouterError, not_ready
 from llm_router.evaluation.outcomes import OutcomeService
@@ -267,6 +268,7 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
     )
     anthropic_gateway = AnthropicGateway(runtime)
     openai_gateway = OpenAIResponsesGateway(runtime)
+    dashboard: DashboardComponents | None = None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -333,9 +335,14 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
             await runtime.observations.close()
             await runtime.observation_store.close()
             await runtime.providers.close()
+            if dashboard is not None:
+                dashboard.executor.close()
 
-    app = FastAPI(title="Coding LLM Router", version="0.7.0", lifespan=lifespan)
+    app = FastAPI(title="Coding LLM Router", version="0.8.0", lifespan=lifespan)
     app.state.runtime = runtime
+    if config.dashboard.enabled:
+        dashboard = bootstrap_dashboard(app, runtime)
+        app.state.dashboard = dashboard
     if config.outcomes.enabled and evaluation is not None:
         register_outcome_route(
             app,
@@ -393,7 +400,7 @@ def create_app(config_path: str = "router.yaml") -> FastAPI:
                 authenticate(request.headers, runtime.client_key)
             except RouterError as error:
                 return AnthropicErrorRenderer().json_error(error, request_id(request.headers))
-        return Response(content=runtime.metrics.render(), media_type="text/plain; version=0.7.0")
+        return Response(content=runtime.metrics.render(), media_type="text/plain; version=0.8.0")
 
     return app
 

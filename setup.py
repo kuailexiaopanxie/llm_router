@@ -5,13 +5,19 @@ from setuptools import find_packages, setup
 
 setup(
     name="coding-llm-router",
-    version="0.7.0",
+    version="0.8.0",
     description="Local-first deterministic router for Anthropic Messages and OpenAI Responses",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     python_requires=">=3.12",
     package_dir={"": "src"},
     packages=find_packages("src"),
+    include_package_data=True,
+    package_data={
+        "llm_router.dashboard.assets": [
+            "*.html", "*.css", "*.js", "views/*.js", "icons/*.svg", "licenses/*",
+        ]
+    },
     install_requires=[
         "aiosqlite>=0.20,<1",
         "fastapi>=0.115,<1",

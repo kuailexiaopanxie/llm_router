@@ -17,6 +17,20 @@ The default listener is `http://127.0.0.1:8848`.
 
 The protocol entry points are `POST /v1/messages` and `POST /v1/responses`.
 
+## Local Dashboard
+
+v0.8 includes a local, read-only observability dashboard. It is disabled by default. Enable it in `router.yaml`:
+
+```yaml
+dashboard:
+  enabled: true
+  require_auth: true
+```
+
+Then open `http://127.0.0.1:8848/admin`. The JSON API is under `/admin/api/v1/overview`, `/admin/api/v1/requests`, and `/admin/api/v1/requests/<request-uuid>`. JSON requests use the existing client key as `Authorization: Bearer ...`; the browser keeps that key in memory only and asks again after reload. A loopback-only deployment may explicitly set `require_auth: false`. Remote listeners reject unauthenticated Dashboard configuration.
+
+The Dashboard is GET/HEAD-only. It reads persisted SQLite observations and a separately labelled live runtime snapshot; it does not edit configuration, route traffic, call Providers, or create observations. It never displays Prompt, Response, Reasoning content, source, tools, session identifiers, credentials, arbitrary headers, or exception text. Unknown and partial facts remain visible as gaps. Cost is labelled `Known estimated cost`, uses decimal nanos strings, and never combines currencies or claims to be an invoice. Missing SQLite history, disabled capture, legacy rows, unavailable trace, and query timeout are shown as distinct states.
+
 v0.4 keeps Anthropic Messages and OpenAI Responses as separate same-protocol routes. The in-memory health coordinator filters targets in cooldown or blocked state, admits one recovery probe after cooldown, and preserves the configured capability and fallback order. Health is disabled with `health.enabled: false`; no Anthropic/OpenAI protocol conversion is performed.
 
 The example configuration uses `health` defaults suitable for local operation. Health state is process-local and resets on restart. SQLite, metrics, and traces contain only bounded observations; request bodies, response bodies, credentials, session identifiers, tool arguments, and reasoning content are not persisted.

@@ -295,6 +295,9 @@ _UNKNOWN_FEATURES = json.dumps(
 
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_route_received ON route_requests(received_at)",
+    "CREATE INDEX IF NOT EXISTS idx_route_received_request ON route_requests(received_at DESC, request_id DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_route_profile_received ON route_requests(profile, received_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_route_policy_received ON route_requests(policy_role, received_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_route_task_received ON route_requests(task_id, received_at)",
     "CREATE INDEX IF NOT EXISTS idx_route_trace ON route_requests(trace_id)",
     "CREATE INDEX IF NOT EXISTS idx_route_final_received ON route_requests(final_model, received_at)",
